@@ -1,0 +1,29 @@
+# dati ACDC - mai committare dati medici
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ambienti virtuali
+venv/
+.env/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# output preprocessing
+preprocessed/
+
+# modelli salvati
+checkpoints/
+*.pt
+*.pth
+
+# OS
+.DS_Store

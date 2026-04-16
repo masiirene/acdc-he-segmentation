@@ -1,0 +1,13 @@
+# ACDC HE Segmentation
+
+Reimplementazione del preprocessing di nnU-Net per la segmentazione cardiaca su ACDC,
+orientata alla compatibilità con Homomorphic Encryption (HE).
+
+## Struttura
+- `preprocessing/` — fingerprint, crop, normalize, resample
+- `network/`       — architettura U-Net
+- `training/`      — dataset, loss, trainer
+- `he/`            — moduli HE
+
+## Riferimento
+Isensee et al., nnU-Net, Nature Methods 2021.
