@@ -27,3 +27,5 @@ checkpoints/
 
 # OS
 .DS_Store
+*.pth
+results/**/*.pth

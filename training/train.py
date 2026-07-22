@@ -1,3 +1,4 @@
+
 import os
 import json
 import argparse
@@ -8,6 +9,7 @@ from tqdm import tqdm
 
 from models.he_friendly import HEFriendlyUNet
 from training.dataset import ACDCDataset, load_splits
+from tools.load_pretrained import load_pretrained_conv
 
 
 class DiceLoss(nn.Module):
@@ -101,28 +103,32 @@ def train(args):
     print(f'Model: act={args.act}, norm={args.norm}, params={n_params:,}')
 
     if args.pretrained:
-        checkpoint = torch.load(args.pretrained, map_location='cpu',
-                                weights_only=False)
-        state = checkpoint.get('model_state_dict', checkpoint)
-        model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in state.items()
-                           if k in model_dict and
-                           model_dict[k].shape == v.shape}
-        model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
-        print(f'Loaded {len(pretrained_dict)}/{len(model_dict)} layers from pretrained')
+        model = load_pretrained_conv(model, args.pretrained)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
+                                 weight_decay=args.weight_decay)
+
+    def get_lr(epoch):
+        return args.lr
+
     criterion = DiceCELoss(num_classes=4)
 
-    run_name = f'act={args.act}_norm={args.norm}'
-    out_dir  = os.path.join(args.out_dir, run_name)
+    run_name = f'act={args.act}_norm={args.norm}_bs{args.batch_size}_lr{args.lr}' 
+    if args.warmup > 0:
+        run_name += f'_warmup{args.warmup}'
+    out_dir = os.path.join(args.out_dir, run_name)
     os.makedirs(out_dir, exist_ok=True)
 
     best_dice = 0.0
     history   = []
+    patience_counter = 0
 
     for epoch in range(1, args.epochs + 1):
+        # Aggiorna lr
+        current_lr = get_lr(epoch)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+
         model.train()
         train_loss = 0.0
         for imgs, segs in tqdm(train_loader,
@@ -158,23 +164,34 @@ def train(args):
                 dice_lv.append(scores[3])
 
         val_loss /= len(val_loader)
+
+        if torch.isnan(torch.tensor(val_loss)):
+            val_loss = 999.0  # sostituisce NaN ma non skippa l'epoca
+
         rv  = sum(dice_rv)  / len(dice_rv)
         myo = sum(dice_myo) / len(dice_myo)
         lv  = sum(dice_lv)  / len(dice_lv)
         mean_dice = (rv + myo + lv) / 3
 
         print(f'Epoch {epoch:3d} | loss {train_loss:.4f} | val_loss {val_loss:.4f} | '
-              f'RV {rv:.3f} MYO {myo:.3f} LV {lv:.3f} | mean {mean_dice:.3f}')
+              f'RV {rv:.3f} MYO {myo:.3f} LV {lv:.3f} | mean {mean_dice:.3f} | lr {current_lr:.2e}')
 
         history.append({
             'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss,
-            'dice_rv': rv, 'dice_myo': myo, 'dice_lv': lv, 'mean_dice': mean_dice
+            'dice_rv': rv, 'dice_myo': myo, 'dice_lv': lv,
+            'mean_dice': mean_dice, 'lr': current_lr
         })
 
         if mean_dice > best_dice:
             best_dice = mean_dice
+            patience_counter = 0
             torch.save(model.state_dict(), os.path.join(out_dir, 'best_model.pth'))
             print(f'  → saved best model (mean dice {best_dice:.3f})')
+        else:
+            patience_counter += 1
+            if patience_counter >= args.early_stop:
+                print(f'\nEarly stopping at epoch {epoch}')
+                break
 
     torch.save(model.state_dict(), os.path.join(out_dir, 'final_model.pth'))
     with open(os.path.join(out_dir, 'history.json'), 'w') as f:
@@ -189,11 +206,14 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', default=os.path.expanduser('~/Desktop/tesi_acdc/training'))
     parser.add_argument('--out_dir',  default='results')
     parser.add_argument('--act',      default='poly', choices=['identity', 'linear', 'squared', 'poly'])
-    parser.add_argument('--norm',     default='none', choices=['none', 'batch', 'instance'])
-    parser.add_argument('--epochs',   type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--lr',       type=float, default=1e-3)
+    parser.add_argument('--norm',     default='none', choices=['none', 'batch', 'instance', 'group'])
+    parser.add_argument('--epochs',   type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--lr',       type=float, default=1e-4)
     parser.add_argument('--fold',     type=int, default=0)
     parser.add_argument('--pretrained', default=None)
+    parser.add_argument('--early_stop', type=int, default=20)
+    parser.add_argument('--warmup',   type=int, default=0)
+    parser.add_argument('--weight_decay', type=float, default=0.0)
     args = parser.parse_args()
     train(args)
