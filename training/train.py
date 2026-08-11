@@ -99,6 +99,16 @@ def train(args):
         norm_type=args.norm
     ).to(device)
 
+    start_epoch = 1
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        best_dice = ckpt['best_dice']
+        history = ckpt['history']
+        start_epoch = ckpt['epoch'] + 1
+        print(f'Resumed from epoch {ckpt["epoch"]}, best dice {best_dice:.3f}')
+
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Model: act={args.act}, norm={args.norm}, params={n_params:,}')
 
@@ -123,7 +133,7 @@ def train(args):
     history   = []
     patience_counter = 0
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         # Aggiorna lr
         current_lr = get_lr(epoch)
         for param_group in optimizer.param_groups:
@@ -193,6 +203,17 @@ def train(args):
                 print(f'\nEarly stopping at epoch {epoch}')
                 break
 
+        if epoch % 50 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_dice': best_dice,
+                'history': history,
+            }, os.path.join(out_dir, f'checkpoint_epoch{epoch}.pth'))
+            print(f'  → checkpoint saved at epoch {epoch}')    
+
+
     torch.save(model.state_dict(), os.path.join(out_dir, 'final_model.pth'))
     with open(os.path.join(out_dir, 'history.json'), 'w') as f:
         json.dump(history, f, indent=2)
@@ -206,7 +227,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', default=os.path.expanduser('~/Desktop/tesi_acdc/training'))
     parser.add_argument('--out_dir',  default='results')
     parser.add_argument('--act',      default='poly', choices=['identity', 'linear', 'squared', 'poly'])
-    parser.add_argument('--norm',     default='none', choices=['none', 'batch', 'instance', 'group'])
+    parser.add_argument('--norm',     default='none', choices=['none', 'batch', 'instance', 'group', 'poly'])
     parser.add_argument('--epochs',   type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr',       type=float, default=1e-4)
@@ -215,5 +236,6 @@ if __name__ == '__main__':
     parser.add_argument('--early_stop', type=int, default=20)
     parser.add_argument('--warmup',   type=int, default=0)
     parser.add_argument('--weight_decay', type=float, default=0.0)
+    parser.add_argument('--resume', default=None)
     args = parser.parse_args()
     train(args)
