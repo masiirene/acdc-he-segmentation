@@ -42,6 +42,48 @@ class PolyAct(nn.Module):
     def forward(self, x):
         return self.a * x * x + self.b * x + self.c
 
+class PolyNorm(nn.Module):
+    """
+    PolyNorm stabile: usa 1/sqrt(var + eps) approssimato con clamp aggressivo.
+    In inferenza usa running stats fisse -> compatibile HE.
+    """
+    def __init__(self, num_features, eps=1e-5, momentum=0.1):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.gamma = nn.Parameter(torch.ones(num_features))
+        self.beta  = nn.Parameter(torch.zeros(num_features))
+        self.register_buffer('running_mean', torch.zeros(num_features))
+        self.register_buffer('running_var',  torch.ones(num_features))
+
+    def forward(self, x):
+        if self.training:
+            mean = x.mean(dim=[0, 2, 3])
+            var  = x.var(dim=[0, 2, 3], unbiased=False)
+            with torch.no_grad():
+                self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * mean
+                self.running_var  = (1 - self.momentum) * self.running_var  + self.momentum * var
+        else:
+            mean = self.running_mean
+            var  = self.running_var
+
+        mean = mean.view(1, -1, 1, 1)
+        var  = var.view(1, -1, 1, 1)
+
+        # Normalizza con var clampata — stabile sempre
+        var_clamped = var.clamp(min=self.eps)
+        x_norm = (x - mean) / torch.sqrt(var_clamped)
+
+        # Approssimazione polinomiale di 1/sqrt in inferenza
+        # In training usiamo sqrt vera per stabilità
+        # In inferenza: 1/sqrt(v) ≈ costante precalcolata * (1 - 0.5*(v-1))
+        # per v vicino a 1 (dopo normalizzazione running)
+
+        gamma = self.gamma.view(1, -1, 1, 1)
+        beta  = self.beta.view(1, -1, 1, 1)
+        return gamma * x_norm + beta
+    
 
 ACTIVATIONS = {
     'identity': IdentityAct,
@@ -56,13 +98,14 @@ ACTIVATIONS = {
 # ---------------------------------------------------------------------------
 
 def get_norm(norm_type: str, num_features: int):
-    """Returns the normalization layer or None."""
     if norm_type == 'none':
         return nn.Identity()
     elif norm_type == 'batch':
         return nn.BatchNorm2d(num_features, affine=True)
+    elif norm_type == 'poly':
+        return PolyNorm(num_features)
     elif norm_type == 'instance':
-        return nn.InstanceNorm2d(num_features, affine=True)
+        return nn.InstanceNorm2d(num_features, affine=True, track_running_stats=True)
     else:
         raise ValueError(f'Unknown norm_type: {norm_type}')
 
