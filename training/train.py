@@ -60,6 +60,18 @@ def train(args):
         device = torch.device('cpu')
     print(f'Device: {device}')
 
+    # Fix random seed for reproducibility
+    import random
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print('Random seed fixed to 42')
+
     splits_path = os.path.join(args.data_dir, '..', 'splits_final.json')
     if os.path.exists(splits_path):
         train_cases, val_cases = load_splits(splits_path, fold=args.fold)
