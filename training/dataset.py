@@ -6,14 +6,23 @@ import torch
 from torch.utils.data import Dataset
 
 
-def zscore_normalize(img: np.ndarray) -> np.ndarray:
-    """Z-score normalization on nonzero voxels (same as nnU-Net)."""
+def zscore_normalize(img: np.ndarray, clip_range: float = 5.0) -> np.ndarray:
+    """
+    Z-score normalization on nonzero voxels (same as nnU-Net), con clipping.
+
+    Il clipping a +/- clip_range deviazioni standard evita che outlier di
+    intensita' (es. sangue molto luminoso in alcune slice cardiache) vengano
+    amplificati in modo incontrollato da attivazioni polinomiali non limitate
+    (PolyAct = ax^2+bx+c), che a differenza di ReLU non saturano mai e possono
+    esplodere a Inf/NaN attraversando piu' layer.
+    """
     mask = img != 0
     if mask.sum() == 0:
         return img
     mean = img[mask].mean()
     std  = img[mask].std()
-    return (img - mean) / (std + 1e-8)
+    normalized = (img - mean) / (std + 1e-8)
+    return np.clip(normalized, -clip_range, clip_range)
 
 
 def pad_or_crop(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
@@ -37,20 +46,22 @@ class ACDCDataset(Dataset):
     ACDC 2D slice dataset.
 
     Loads ED and ES frames for each patient, extracts 2D slices,
-    applies Z-score normalization and pad/crop to patch_size.
+    applies Z-score normalization (con clipping) and pad/crop to patch_size.
 
     Args:
         data_dir:   path to ACDC training/ folder
         case_list:  list of case names to include (e.g. ['patient001_frame01'])
         patch_size: (H, W) tuple, default (256, 224)
         augment:    if True, applies random horizontal flip
+        clip_range: range per il clipping dello z-score (default 5.0)
     """
 
     def __init__(self, data_dir: str, case_list: list,
-                 patch_size=(256, 224), augment=False):
+                 patch_size=(256, 224), augment=False, clip_range: float = 5.0):
         self.data_dir   = data_dir
         self.patch_size = patch_size
         self.augment    = augment
+        self.clip_range = clip_range
         self.slices     = []  # list of (img_path, seg_path, slice_idx)
 
         for case in case_list:
@@ -82,8 +93,8 @@ class ACDCDataset(Dataset):
         img = nib.load(img_path).get_fdata()[:, :, s].astype(np.float32)
         seg = nib.load(seg_path).get_fdata()[:, :, s].astype(np.int64)
 
-        # Normalize
-        img = zscore_normalize(img)
+        # Normalize (con clipping per stabilita' numerica con PolyAct)
+        img = zscore_normalize(img, clip_range=self.clip_range)
 
         # Pad/crop to patch size
         img = pad_or_crop(img, *self.patch_size)

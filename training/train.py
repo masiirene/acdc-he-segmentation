@@ -1,10 +1,9 @@
-
 import os
 import json
 import argparse
 import torch
-import numpy as np
 import torch.nn as nn
+import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -50,6 +49,22 @@ def dice_score(pred, target, num_classes=4):
         score = (2 * intersection + 1e-5) / (p.sum() + t.sum() + 1e-5)
         scores[c] = score.item()
     return scores
+
+
+def safe_clamp_logits(logits, clamp_value=50.0):
+    """
+    Clampa i logits in [-clamp_value, clamp_value] come rete di sicurezza
+    contro l'esplosione numerica di PolyAct (ax^2+bx+c, non limitata) che
+    puo' ancora verificarsi nei layer interni anche con input clippato.
+
+    Ritorna (logits_clampati, n_valori_clampati) per poter monitorare
+    quanto spesso interviene.
+    """
+    n_clamped = (~torch.isfinite(logits) | (logits.abs() > clamp_value)).sum().item()
+    # Prima sostituisci eventuali NaN/Inf con 0, poi clippa il resto nel range
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
+    logits = torch.clamp(logits, -clamp_value, clamp_value)
+    return logits, n_clamped
 
 
 def train(args):
@@ -112,7 +127,14 @@ def train(args):
         norm_type=args.norm
     ).to(device)
 
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
+                                 weight_decay=args.weight_decay)
+
     start_epoch = 1
+    best_dice = 0.0
+    history   = []
+    patience_counter = 0
+
     if args.resume:
         ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
         model.load_state_dict(ckpt['model_state_dict'])
@@ -128,23 +150,16 @@ def train(args):
     if args.pretrained:
         model = load_pretrained_conv(model, args.pretrained)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
-                                 weight_decay=args.weight_decay)
-
     def get_lr(epoch):
         return args.lr
 
     criterion = DiceCELoss(num_classes=4)
 
-    run_name = f'act={args.act}_norm={args.norm}_bs{args.batch_size}_lr{args.lr}' 
+    run_name = f'act={args.act}_norm={args.norm}_bs{args.batch_size}_lr{args.lr}'
     if args.warmup > 0:
         run_name += f'_warmup{args.warmup}'
     out_dir = os.path.join(args.out_dir, run_name)
     os.makedirs(out_dir, exist_ok=True)
-
-    best_dice = 0.0
-    history   = []
-    patience_counter = 0
 
     for epoch in range(start_epoch, args.epochs + 1):
         # Aggiorna lr
@@ -154,6 +169,7 @@ def train(args):
 
         model.train()
         train_loss = 0.0
+        n_clamped_train = 0
         for imgs, segs in tqdm(train_loader,
                                desc=f'Epoch {epoch}/{args.epochs} [train]',
                                leave=False):
@@ -161,6 +177,8 @@ def train(args):
             segs = segs.to(device)
             optimizer.zero_grad()
             logits = model(imgs)
+            logits, n_clamp = safe_clamp_logits(logits)
+            n_clamped_train += n_clamp
             loss   = criterion(logits, segs)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -168,28 +186,66 @@ def train(args):
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
+        if n_clamped_train > 0:
+            print(f'  \u26a0\ufe0f  Clamp attivato {n_clamped_train} volte nei logits di training')
 
+        # ---------------------------------------------------------------
+        # VALIDAZIONE con diagnostica NaN/Inf nei logits
+        # ---------------------------------------------------------------
         model.eval()
         val_loss = 0.0
+        n_valid_batches = 0
+        n_clamped_val = 0
         dice_rv, dice_myo, dice_lv = [], [], []
+        nan_cases_this_epoch = []
 
         with torch.no_grad():
-            for imgs, segs in val_loader:
+            for batch_idx, (imgs, segs) in enumerate(val_loader):
                 imgs = imgs.to(device)
                 segs = segs.to(device)
                 logits = model(imgs)
-                loss   = criterion(logits, segs)
-                val_loss += loss.item()
+
+                # --- DIAGNOSTICA: quali sample nel batch hanno logits non finiti ---
+                # NB: ACDCDataset ha una entry per slice 2D (non per paziente/frame),
+                # quindi il mapping corretto passa da val_ds.slices, non da val_cases.
+                bad_mask = ~torch.isfinite(logits).all(dim=(1, 2, 3))
+                if bad_mask.any():
+                    start = batch_idx * val_loader.batch_size
+                    bad_local_idxs = bad_mask.nonzero(as_tuple=True)[0].tolist()
+                    for li in bad_local_idxs:
+                        global_idx = start + li
+                        if global_idx < len(val_ds.slices):
+                            img_path, _, slice_idx = val_ds.slices[global_idx]
+                            # img_path tipo '.../patient002/patient002_frame01.nii.gz'
+                            fname = os.path.basename(img_path).replace('.nii.gz', '')
+                            case_id = f'{fname}_slice{slice_idx}'
+                        else:
+                            case_id = f'idx_{global_idx}'
+                        nan_cases_this_epoch.append(case_id)
+
+                # --- CLAMP di sicurezza sui logits, prima della loss ---
+                logits, n_clamp = safe_clamp_logits(logits)
+                n_clamped_val += n_clamp
+
+                loss = criterion(logits, segs)
+                if torch.isfinite(loss):
+                    val_loss += loss.item()
+                    n_valid_batches += 1
+
                 preds = logits.argmax(dim=1)
                 scores = dice_score(preds, segs)
                 dice_rv.append(scores[1])
                 dice_myo.append(scores[2])
                 dice_lv.append(scores[3])
 
-        val_loss /= len(val_loader)
+        val_loss = val_loss / n_valid_batches if n_valid_batches > 0 else 999.0
 
-        if torch.isnan(torch.tensor(val_loss)):
-            val_loss = 999.0  # sostituisce NaN ma non skippa l'epoca
+        if nan_cases_this_epoch:
+            unique_cases = sorted(set(nan_cases_this_epoch))
+            print(f'  \u26a0\ufe0f  NaN/Inf nei logits (prima del clamp) — {len(unique_cases)} casi: {unique_cases[:10]}'
+                  f'{" ..." if len(unique_cases) > 10 else ""}')
+        if n_clamped_val > 0:
+            print(f'  \u26a0\ufe0f  Clamp attivato {n_clamped_val} volte nei logits di validazione')
 
         rv  = sum(dice_rv)  / len(dice_rv)
         myo = sum(dice_myo) / len(dice_myo)
@@ -202,7 +258,8 @@ def train(args):
         history.append({
             'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss,
             'dice_rv': rv, 'dice_myo': myo, 'dice_lv': lv,
-            'mean_dice': mean_dice, 'lr': current_lr
+            'mean_dice': mean_dice, 'lr': current_lr,
+            'nan_cases': sorted(set(nan_cases_this_epoch))
         })
 
         if mean_dice > best_dice:
@@ -224,7 +281,7 @@ def train(args):
                 'best_dice': best_dice,
                 'history': history,
             }, os.path.join(out_dir, f'checkpoint_epoch{epoch}.pth'))
-            print(f'  → checkpoint saved at epoch {epoch}')    
+            print(f'  → checkpoint saved at epoch {epoch}')
 
 
     torch.save(model.state_dict(), os.path.join(out_dir, 'final_model.pth'))

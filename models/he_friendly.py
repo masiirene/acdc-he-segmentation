@@ -32,15 +32,30 @@ class PolyAct(nn.Module):
     """ax² + bx + c — learnable polynomial, HE depth cost: 1
     Inspired by ULD-Net (Xie et al., ICLR 2026).
     Initialization from ULD-Net: c0=0.5, c1=1, c2=0.1
+
+    NB: ax²+bx+c non e' una funzione limitata. Con a≈0.1, appena |x| supera
+    circa 1/a=10 il termine quadratico inizia a dominare e amplifica il
+    valore ad ogni layer successivo. In una rete profonda (qui: 22 istanze
+    di PolyAct in cascata tra encoder e decoder) questo puo' portare a
+    un'esplosione esponenziale da valori "normali" (~10-40) fino a Inf/NaN
+    nel giro di pochi stage — osservato empiricamente su alcuni pazienti
+    ACDC (vedi inspect_activations.py). Il clamp qui sotto taglia il valore
+    di uscita prima che si propaghi al layer successivo, fermando la
+    catena di amplificazione. clamp_value=50 e' scelto sopra il range
+    osservato per attivazioni "sane" (~8-38), per non alterare il segnale
+    legittimo.
     """
-    def __init__(self):
+    def __init__(self, clamp_value: float = 50.0):
         super().__init__()
         self.a = nn.Parameter(torch.tensor(0.1))   # c2
         self.b = nn.Parameter(torch.tensor(1.0))   # c1
         self.c = nn.Parameter(torch.tensor(0.5))   # c0
+        self.clamp_value = clamp_value
 
     def forward(self, x):
-        return self.a * x * x + self.b * x + self.c
+        out = self.a * x * x + self.b * x + self.c
+        return torch.clamp(out, -self.clamp_value, self.clamp_value)
+
 
 class PolyNorm(nn.Module):
     """
@@ -83,7 +98,7 @@ class PolyNorm(nn.Module):
         gamma = self.gamma.view(1, -1, 1, 1)
         beta  = self.beta.view(1, -1, 1, 1)
         return gamma * x_norm + beta
-    
+
 
 ACTIVATIONS = {
     'identity': IdentityAct,
