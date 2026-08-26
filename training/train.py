@@ -40,6 +40,60 @@ class DiceCELoss(nn.Module):
         return self.dice(logits, targets) + self.ce(logits, targets)
 
 
+def get_param_groups(model):
+    """
+    Raggruppa i parametri del modello per tipo, per permettere di
+    congelare/scongelare selettivamente gruppi durante il training a fasi:
+      - 'conv': pesi delle Conv2d/ConvTranspose2d (pretrained dal baseline)
+      - 'act':  coefficienti a,b,c di ogni PolyAct
+      - 'norm': gamma,beta di InstanceNorm2d/BatchNorm2d
+    """
+    from models.he_friendly import PolyAct
+    groups = {'conv': [], 'act': [], 'norm': []}
+    seen = set()
+    for name, module in model.named_modules():
+        if isinstance(module, PolyAct):
+            for p in module.parameters(recurse=False):
+                if id(p) not in seen:
+                    groups['act'].append(p)
+                    seen.add(id(p))
+        elif isinstance(module, (nn.InstanceNorm2d, nn.BatchNorm2d)):
+            for p in module.parameters(recurse=False):
+                if id(p) not in seen:
+                    groups['norm'].append(p)
+                    seen.add(id(p))
+        elif isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
+            for p in module.parameters(recurse=False):
+                if id(p) not in seen:
+                    groups['conv'].append(p)
+                    seen.add(id(p))
+    return groups
+
+
+def apply_freeze(model, freeze_arg):
+    """
+    Congela i gruppi di parametri elencati in freeze_arg (stringa CSV,
+    es. 'conv' o 'conv,norm'). Ritorna la lista dei parametri allenabili.
+    """
+    groups = get_param_groups(model)
+    freeze_groups = [g.strip() for g in freeze_arg.split(',') if g.strip()] if freeze_arg else []
+
+    for g in freeze_groups:
+        if g not in groups:
+            raise ValueError(f"Gruppo di freeze sconosciuto: '{g}'. Validi: {list(groups.keys())}")
+        for p in groups[g]:
+            p.requires_grad = False
+
+    if freeze_groups:
+        print(f'Gruppi congelati: {freeze_groups}')
+
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable)
+    n_total = sum(p.numel() for p in model.parameters())
+    print(f'Parametri allenabili: {n_trainable:,} / {n_total:,} ({100*n_trainable/n_total:.1f}%)')
+    return trainable
+
+
 def dice_score(pred, target, num_classes=4):
     scores = {}
     for c in range(1, num_classes):
@@ -127,8 +181,27 @@ def train(args):
         norm_type=args.norm
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
-                                 weight_decay=args.weight_decay)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f'Model: act={args.act}, norm={args.norm}, params={n_params:,}')
+
+    # --- Caricamento pesi iniziali ---
+    # --pretrained: solo le Conv2d dal baseline nnU-Net (usato in Fase II,
+    #               partendo da un modello HEFriendlyUNet non ancora addestrato)
+    # --init_from:  l'intero modello da un checkpoint di una fase precedente
+    #               del training a fasi (es. Fase II -> Fase III)
+    if args.pretrained:
+        model = load_pretrained_conv(model, args.pretrained)
+        print(f'Pesi conv caricati da: {args.pretrained}')
+    if args.init_from:
+        state = torch.load(args.init_from, map_location=device, weights_only=False)
+        model.load_state_dict(state)
+        print(f'Modello inizializzato da: {args.init_from}')
+
+    # --- Freeze selettivo per il training a fasi ---
+    trainable_params = apply_freeze(model, args.freeze)
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr,
+                                  weight_decay=args.weight_decay)
 
     start_epoch = 1
     best_dice = 0.0
@@ -144,18 +217,14 @@ def train(args):
         start_epoch = ckpt['epoch'] + 1
         print(f'Resumed from epoch {ckpt["epoch"]}, best dice {best_dice:.3f}')
 
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f'Model: act={args.act}, norm={args.norm}, params={n_params:,}')
-
-    if args.pretrained:
-        model = load_pretrained_conv(model, args.pretrained)
-
     def get_lr(epoch):
         return args.lr
 
     criterion = DiceCELoss(num_classes=4)
 
     run_name = f'act={args.act}_norm={args.norm}_bs{args.batch_size}_lr{args.lr}'
+    if args.freeze:
+        run_name += f'_freeze-{args.freeze.replace(",", "-")}'
     if args.warmup > 0:
         run_name += f'_warmup{args.warmup}'
     out_dir = os.path.join(args.out_dir, run_name)
@@ -181,7 +250,7 @@ def train(args):
             n_clamped_train += n_clamp
             loss   = criterion(logits, segs)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
             optimizer.step()
             train_loss += loss.item()
 
@@ -302,7 +371,14 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr',       type=float, default=1e-4)
     parser.add_argument('--fold',     type=int, default=0)
-    parser.add_argument('--pretrained', default=None)
+    parser.add_argument('--pretrained', default=None,
+                        help='Path a pesi conv-only del baseline (usato in Fase II)')
+    parser.add_argument('--init_from', default=None,
+                        help='Path a un checkpoint completo di una fase precedente (usato in Fase III)')
+    parser.add_argument('--freeze', default=None,
+                        help="Gruppi di parametri da congelare, CSV tra 'conv','act','norm'. "
+                             "Es: --freeze conv (Fase II, congela le conv, allena act+norm) "
+                             "oppure --freeze norm (Fase III, congela IN, allena conv+act)")
     parser.add_argument('--early_stop', type=int, default=20)
     parser.add_argument('--warmup',   type=int, default=0)
     parser.add_argument('--weight_decay', type=float, default=0.0)
