@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+import math
 import torch
 import torch.nn as nn
 import numpy as np
@@ -218,11 +219,29 @@ def train(args):
         print(f'Resumed from epoch {ckpt["epoch"]}, best dice {best_dice:.3f}')
 
     def get_lr(epoch):
-        return args.lr
+        if args.lr_schedule == 'constant':
+            return args.lr
+        elif args.lr_schedule == 'cosine':
+            # Warmup lineare (se args.warmup > 0), poi decadimento coseno
+            # fino a lr_min all'ultima epoca.
+            if args.warmup > 0 and epoch <= args.warmup:
+                return args.lr * epoch / args.warmup
+            total = max(1, args.epochs - args.warmup)
+            progress = (epoch - args.warmup) / total
+            progress = min(max(progress, 0.0), 1.0)
+            return args.lr_min + 0.5 * (args.lr - args.lr_min) * (1 + math.cos(math.pi * progress))
+        elif args.lr_schedule == 'step':
+            # Dimezza (o moltiplica per lr_decay) il lr ogni lr_step_size epoche
+            n_decays = (epoch - 1) // args.lr_step_size
+            return max(args.lr * (args.lr_decay ** n_decays), args.lr_min)
+        else:
+            raise ValueError(f'lr_schedule sconosciuto: {args.lr_schedule}')
 
     criterion = DiceCELoss(num_classes=4)
 
     run_name = f'act={args.act}_norm={args.norm}_bs{args.batch_size}_lr{args.lr}'
+    if args.lr_schedule != 'constant':
+        run_name += f'_sched-{args.lr_schedule}'
     if args.freeze:
         run_name += f'_freeze-{args.freeze.replace(",", "-")}'
     if args.warmup > 0:
@@ -370,6 +389,16 @@ if __name__ == '__main__':
     parser.add_argument('--epochs',   type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr',       type=float, default=1e-4)
+    parser.add_argument('--lr_schedule', default='constant', choices=['constant', 'cosine', 'step'],
+                        help="'constant' (default, comportamento originale): lr fisso per tutto il training. "
+                             "'cosine': warmup lineare (se --warmup>0) poi decadimento a coseno fino a lr_min. "
+                             "'step': dimezza (o *lr_decay) il lr ogni lr_step_size epoche.")
+    parser.add_argument('--lr_min',   type=float, default=1e-6,
+                        help='lr minimo raggiungibile con schedule cosine/step')
+    parser.add_argument('--lr_step_size', type=int, default=30,
+                        help='ogni quante epoche decade il lr con schedule step')
+    parser.add_argument('--lr_decay', type=float, default=0.5,
+                        help='fattore moltiplicativo del decadimento con schedule step')
     parser.add_argument('--fold',     type=int, default=0)
     parser.add_argument('--pretrained', default=None,
                         help='Path a pesi conv-only del baseline (usato in Fase II)')
