@@ -39,11 +39,20 @@ class PolyAct(nn.Module):
     di PolyAct in cascata tra encoder e decoder) questo puo' portare a
     un'esplosione esponenziale da valori "normali" (~10-40) fino a Inf/NaN
     nel giro di pochi stage — osservato empiricamente su alcuni pazienti
-    ACDC (vedi inspect_activations.py). Il clamp qui sotto taglia il valore
-    di uscita prima che si propaghi al layer successivo, fermando la
-    catena di amplificazione. clamp_value=50 e' scelto sopra il range
-    osservato per attivazioni "sane" (~8-38), per non alterare il segnale
-    legittimo.
+    ACDC (vedi inspect_activations.py).
+
+    STRAIGHT-THROUGH ESTIMATOR (suggerimento Aurora, dopo che il clamp
+    "semplice" si e' rivelato indispensabile anche in inferenza, non solo
+    in training -- vedi crypto/check_inference_stability.py):
+    Un clamp normale ha derivata zero nei punti clampati: durante il
+    backward, la rete "non vede" l'errore proprio dove servirebbe di piu'
+    correggersi, rendendo difficile imparare coefficienti che non abbiano
+    bisogno del clamp. Con lo straight-through estimator, il FORWARD resta
+    clampato (stabilita' numerica preservata, identico a prima), ma il
+    BACKWARD usa il gradiente pieno del polinomio non clampato -- cosi' la
+    rete riceve un segnale di correzione anche nei punti critici, ed e'
+    incentivata a imparare pesi/coefficienti che tengano i valori dentro
+    il range da sola, riducendo nel tempo quanto il clamp deve intervenire.
     """
     def __init__(self, clamp_value: float = 50.0):
         super().__init__()
@@ -54,7 +63,11 @@ class PolyAct(nn.Module):
 
     def forward(self, x):
         out = self.a * x * x + self.b * x + self.c
-        return torch.clamp(out, -self.clamp_value, self.clamp_value)
+        clamped = torch.clamp(out, -self.clamp_value, self.clamp_value)
+        # Straight-through: il valore restituito e' quello clampato, ma il
+        # gradiente che si propaga indietro e' quello del polinomio pieno
+        # (il termine (clamped-out) e' "staccato" dal grafo autograd).
+        return out + (clamped - out).detach()
 
 
 class PolyNorm(nn.Module):
