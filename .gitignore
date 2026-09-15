@@ -29,3 +29,4 @@ checkpoints/
 .DS_Store
 *.pth
 results/**/*.pth
+results/
