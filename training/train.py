@@ -125,16 +125,36 @@ def safe_clamp_logits(logits, clamp_value=50.0):
     return logits, n_clamped
 
 
-def activation_penalty(model):
+def activation_penalty(model, penalty_threshold=50.0, use_layer_threshold=False):
     """
     Penalita' sulle attivazioni PolyAct (proposta di Aurora): per ogni
     PolyAct, penalizza quanto il valore GREZZO (pre-clamp, .last_raw
-    esposto dal forward) supera la soglia di quel layer. Se il valore
+    esposto dal forward) supera una soglia di riferimento. Se il valore
     resta dentro la soglia, penalita' zero -- nessun effetto sul training
     normale. Se la supera, il gradiente di questo termine extra spinge
     esplicitamente i pesi a produrre valori piu' contenuti, invece di
     limitarsi a "tagliarli" dopo (clamp) o sperare che lo facciano da soli
     (straight-through estimator).
+
+    IMPORTANTE: 'penalty_threshold' e' INDIPENDENTE dal 'clamp_value' di
+    ciascuna PolyAct SOLO se use_layer_threshold=False (default, per
+    retrocompatibilita' -- necessario per test come "penalita' senza
+    clamp interno", dove clamp_value viene alzato a un valore enorme per
+    disattivare il clamp SENZA disattivare anche la penalita').
+
+    CORREZIONE (dopo un run in cui STE+soglie calibrate+penalita' produceva
+    comunque valori enormi in eval mode su alcuni layer, es. dec0.block.5
+    fino a 5491): con use_layer_threshold=True, la penalita' usa la
+    soglia CALIBRATA PER-LAYER di ciascuna PolyAct (m.clamp_value) invece
+    di un unico valore globale. Senza questo allineamento, un layer con
+    soglia di clamp stretta (es. 7.0) viene limitato a forza dal clamp
+    interno ma la penalita' non se ne accorge fino a superare la soglia
+    globale (default 50.0, molto piu' larga) -- il clamp "fa il lavoro"
+    ma la penalita' non collabora, lasciando che i pesi continuino a
+    spingere verso valori grandi che poi si accumulano nei layer
+    successivi. Allineare le due soglie fa si' che la penalita' rinforzi
+    esattamente il vincolo che il clamp sta gia' imponendo, layer per
+    layer.
 
     Ritorna un tensore scalare (0.0 se nessuna PolyAct ha .last_raw
     disponibile, es. prima del primo forward).
@@ -144,7 +164,8 @@ def activation_penalty(model):
     n_layers = 0
     for m in model.modules():
         if isinstance(m, PolyAct) and hasattr(m, 'last_raw'):
-            excess = torch.relu(m.last_raw.abs() - m.clamp_value)
+            threshold = m.clamp_value if use_layer_threshold else penalty_threshold
+            excess = torch.relu(m.last_raw.abs() - threshold)
             total = total + (excess ** 2).mean()
             n_layers += 1
     if n_layers == 0:
@@ -605,7 +626,8 @@ def train(args):
             n_clamped_train += n_clamp
             loss = criterion(logits, segs)
             if args.act_penalty_weight > 0:
-                pen = activation_penalty(model)
+                pen = activation_penalty(model, penalty_threshold=args.act_penalty_threshold,
+                                        use_layer_threshold=args.act_penalty_use_layer_threshold)
                 loss = loss + args.act_penalty_weight * pen
                 epoch_penalty += pen.item()
             loss.backward()
@@ -847,8 +869,26 @@ if __name__ == '__main__':
                         help='Peso della penalita\' esplicita sulle attivazioni PolyAct '
                              '(proposta Aurora, alternativa allo straight-through estimator). '
                              '0.0 = disattivata (default, comportamento invariato). '
-                             'Penalizza quanto il valore grezzo pre-clamp supera la soglia '
-                             'di quel layer, spingendo la rete a restare naturalmente contenuta.')
+                             'Penalizza quanto il valore grezzo pre-clamp supera '
+                             '--act_penalty_threshold, spingendo la rete a restare naturalmente '
+                             'contenuta.')
+    parser.add_argument('--act_penalty_threshold', type=float, default=50.0,
+                        help='Soglia GLOBALE di riferimento per activation_penalty, usata solo se '
+                             '--act_penalty_use_layer_threshold NON e\' specificato. Indipendente dal '
+                             'clamp_value di ciascuna PolyAct/--clamp_values_json -- permette di '
+                             'disattivare il clamp (soglie enormi via --clamp_values_json) mantenendo '
+                             'la penalita\' attiva con la sua soglia originale, per testare se la '
+                             'penalita\' da sola basta a controllare le attivazioni.')
+    parser.add_argument('--act_penalty_use_layer_threshold', action='store_true',
+                        help='Se presente, la penalita\' usa la soglia CALIBRATA PER-LAYER di ciascuna '
+                             'PolyAct (m.clamp_value, la stessa usata dal clamp interno/--clamp_values_json) '
+                             'invece del valore globale --act_penalty_threshold. Allinea la penalita\' al '
+                             'vincolo che il clamp sta gia\' imponendo layer per layer -- senza questo, '
+                             'un layer con soglia di clamp stretta (es. 7.0) viene limitato a forza dal '
+                             'clamp ma la penalita\' non se ne accorge fino a superare 50 (molto piu\' '
+                             'largo), lasciando che i pesi continuino a spingere verso valori grandi che '
+                             'si accumulano nei layer a valle. NON compatibile con test tipo "penalita\' '
+                             'senza clamp" (in quel caso disattivare questo flag).')
     parser.add_argument('--clamp_values_json', default=None,
                         help='Path a un file JSON con soglie di clamp calibrate per layer '
                              '(prodotto da crypto/calibrate_clamp_threshold.py). '

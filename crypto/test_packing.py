@@ -17,6 +17,7 @@ from crypto.packing import (
     tiled_conv_transpose2d,
     poly_act,
     instance_norm_eval,
+    instance_norm_per_instance,
 )
 
 
@@ -164,7 +165,49 @@ def test_pointwise_layers():
         norm_ref[c] = gamma[c] * (x[c] - rm[c]) / np.sqrt(rv[c] + 1e-5) + beta[c]
     norm_out = instance_norm_eval(x, rm, rv, gamma, beta)
     assert np.allclose(norm_ref, norm_out, atol=1e-6)
-    print(f"[OK] InstanceNorm eval mode pointwise")
+    print(f"[OK] InstanceNorm eval mode pointwise (statistiche di popolazione, riferimento storico)")
+
+
+# ---------------------------------------------------------------------------
+# Test 5bis: InstanceNorm PER-ISTANZA (la normalizzazione ora di riferimento
+# per il modello, vedi CONTESTO_PROGETTO_TESI -- statistiche di popolazione
+# erano la causa dell'instabilita' di Fase III)
+# ---------------------------------------------------------------------------
+
+def test_instance_norm_per_instance():
+    np.random.seed(5)
+    C, H, W = 4, 16, 16
+    n_tiles_h, n_tiles_w = 4, 4
+    x = np.random.randn(C, H, W).astype(np.float32) * 3 + 1  # scala/offset arbitrari
+    gamma = np.random.rand(C).astype(np.float32) + 0.5
+    beta = np.random.rand(C).astype(np.float32)
+
+    # Riferimento: statistiche calcolate DIRETTAMENTE sull'intera immagine,
+    # esattamente come farebbe nn.InstanceNorm2d(track_running_stats=False)
+    # in eval mode (varianza BIASED, coerente con PyTorch).
+    ref = np.zeros_like(x)
+    for c in range(C):
+        mean = x[c].mean()
+        var = x[c].var()  # biased (ddof=0), come PyTorch
+        ref[c] = gamma[c] * (x[c] - mean) / np.sqrt(var + 1e-5) + beta[c]
+
+    tiled = instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w)
+
+    diff = np.abs(ref - tiled).max()
+    assert np.allclose(ref, tiled, atol=1e-3), f"MISMATCH InstanceNorm per-istanza: diff={diff}"
+    print(f"[OK] InstanceNorm per-istanza (tile {n_tiles_h}x{n_tiles_w})  (diff max={diff:.2e})")
+
+    # Verifica addizionale: il risultato NON deve dipendere dalla scelta
+    # della griglia di tile (la statistica e' calcolata sull'intera
+    # immagine indipendentemente da come viene suddivisa in tile) --
+    # importante perche' la griglia cambia ad ogni stage della rete
+    # (stessa griglia FISSA in numero, ma diversa risoluzione in pixel).
+    tiled_2x2 = instance_norm_per_instance(x, gamma, beta, n_tiles_h=2, n_tiles_w=2)
+    diff_grid = np.abs(tiled - tiled_2x2).max()
+    assert np.allclose(tiled, tiled_2x2, atol=1e-4), \
+        f"Il risultato dipende dalla griglia di tile: diff={diff_grid}"
+    print(f"[OK] InstanceNorm per-istanza indipendente dalla griglia di tile "
+          f"(4x4 vs 2x2, diff max={diff_grid:.2e})")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +215,14 @@ def test_pointwise_layers():
 # ---------------------------------------------------------------------------
 
 def test_end_to_end_pipeline_with_skip():
+    """
+    Pipeline end-to-end con normalizzazione PER-ISTANZA (norm_mode del
+    modello di riferimento oggi -- vedi CONTESTO_PROGETTO_TESI). Prima
+    versione di questo test usava instance_norm_eval (statistiche di
+    popolazione fisse, ora note essere la causa dell'instabilita' di
+    Fase III) -- aggiornato per riflettere il modello che si intende
+    davvero portare in HE.
+    """
     np.random.seed(42)
     H, W = 16, 16
     n_tiles_h, n_tiles_w = 4, 4
@@ -191,21 +242,26 @@ def test_end_to_end_pipeline_with_skip():
     b_dec = np.random.randn(Cdec).astype(np.float32) * 0.05
 
     gamma0, beta0 = np.ones(C0) * 1.1, np.zeros(C0) + 0.01
-    rm0, rv0 = np.zeros(C0) + 0.1, np.ones(C0) * 0.9
     gamma1, beta1 = np.ones(C1) * 1.05, np.zeros(C1) + 0.02
-    rm1, rv1 = np.zeros(C1) + 0.05, np.ones(C1) * 1.1
 
     def run(tiled: bool):
         conv = (lambda a, w, b, s: tiled_conv2d(a, w, b, n_tiles_h, n_tiles_w, stride=s)) if tiled \
             else (lambda a, w, b, s: conv2d_reference(a, w, b, stride=s))
         convT = (lambda a, w, b: tiled_conv_transpose2d(a, w, b, n_tiles_h, n_tiles_w)) if tiled \
             else (lambda a, w, b: conv_transpose2d_reference(a, w, b))
+        # La griglia di tile passata a instance_norm_per_instance nel ramo
+        # "tiled" e' la STESSA griglia fissa usata per le convoluzioni --
+        # nel ramo "riferimento" (tiled=False) usiamo griglia 1x1 (un solo
+        # "tile" = l'intera immagine), che e' matematicamente equivalente
+        # a calcolare le statistiche direttamente su tutta l'immagine.
+        norm = (lambda a, g, b: instance_norm_per_instance(a, g, b, n_tiles_h, n_tiles_w)) if tiled \
+            else (lambda a, g, b: instance_norm_per_instance(a, g, b, 1, 1))
 
         e0 = poly_act(conv(x_in, w0, b0, 1))
-        e0 = instance_norm_eval(e0, rm0, rv0, gamma0, beta0)
+        e0 = norm(e0, gamma0, beta0)
 
         e1 = poly_act(conv(e0, w1, b1, 2))
-        e1 = instance_norm_eval(e1, rm1, rv1, gamma1, beta1)
+        e1 = norm(e1, gamma1, beta1)
 
         e2 = poly_act(conv(e1, w2, b2, 2))
 
@@ -222,7 +278,7 @@ def test_end_to_end_pipeline_with_skip():
     for name, t, r in zip(names, tiled_results, ref_results):
         diff = np.abs(t - r).max()
         assert np.allclose(t, r, atol=1e-3), f"MISMATCH {name}: diff={diff}"
-        print(f"[OK] end-to-end: {name:26s} shape={str(t.shape):15s} diff max={diff:.2e}")
+        print(f"[OK] end-to-end (norm per-istanza): {name:26s} shape={str(t.shape):15s} diff max={diff:.2e}")
 
 
 if __name__ == "__main__":
@@ -234,6 +290,7 @@ if __name__ == "__main__":
     test_tile_grid_continuity()
     test_conv_transpose2d()
     test_pointwise_layers()
+    test_instance_norm_per_instance()
     test_end_to_end_pipeline_with_skip()
     print("\n" + "=" * 70)
     print("TUTTI I TEST PASSATI")

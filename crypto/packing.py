@@ -202,30 +202,52 @@ def tiled_conv_transpose2d(x, weight, bias, n_tiles_h, n_tiles_w, K=2, stride=2)
 # Layer pointwise (PolyAct, InstanceNorm in eval mode)
 # ---------------------------------------------------------------------------
 
-def poly_act(x, a=0.1, b=1.0, c=0.5):
+def poly_act(x, a=0.1, b=1.0, c=0.5, clamp_value=None):
     """
     PolyAct: a*x^2 + b*x + c, applicata elemento per elemento.
 
     Compatibile nativamente con il tiling: essendo pointwise, non serve
     alcuna rotazione ne' contesto tra tile diversi -- ogni ciphertext/tile
-    si trasforma in modo completamente indipendente. Nota: il clamp
-    interno che abbiamo introdotto in plaintext (models/he_friendly.py,
-    fix instabilita' numerica) NON e' direttamente traducibile in HE
+    si trasforma in modo completamente indipendente.
+
+    clamp_value: se None (default), nessun clamp -- il polinomio puro,
+    utile per isolare la correttezza matematica del tiling dalla questione
+    del clamp (vedi packing_match_test.py). Se specificato, applica
+    np.clip(out, -clamp_value, clamp_value) -- riproduce il comportamento
+    REALE del modello allenato in eval mode: lo straight-through estimator
+    (models/he_friendly.py:PolyAct.forward) restituisce SEMPRE il valore
+    clampato nel forward (il gradiente e' "straight-through", ma il valore
+    numerico no) -- quindi il modello salvato, anche in inferenza pura,
+    clippa davvero. NON e' direttamente traducibile in HE cosi' com'e'
     (CKKS non supporta operazioni di confronto/clamp senza approssimazioni
     polinomiali dedicate) -- da affrontare separatamente in Fase 3D.
     """
-    return a * x * x + b * x + c
+    out = a * x * x + b * x + c
+    if clamp_value is not None:
+        out = np.clip(out, -clamp_value, clamp_value)
+    return out
 
 
 def instance_norm_eval(x, running_mean, running_var, gamma, beta, eps=1e-5):
     """
-    InstanceNorm2d in eval mode: usa running_mean/running_var CONGELATE
-    (accumulate durante il training in plaintext), non calcolate al volo.
+    InstanceNorm2d in eval mode CON STATISTICHE DI POPOLAZIONE CONGELATE
+    (running_mean/running_var accumulate durante il training in plaintext).
+
+    ATTENZIONE -- SUPERATA, TENUTA SOLO COME RIFERIMENTO STORICO/CONFRONTO:
+    questa e' la modalita' che il progetto ha diagnosticato come causa
+    strutturale del bisogno di clamp in Fase III (vedi CONTESTO_PROGETTO_
+    TESI: con statistiche di popolazione, 46/46 batch di validazione
+    esplodono in NaN/Inf a clamp disattivato; con statistiche per-istanza,
+    0/46). Il modello che si intende portare in HE ora usa
+    norm_mode='per_instance' -- usare instance_norm_per_instance() qui
+    sotto, non questa funzione, per l'implementazione HE reale.
 
     In questa modalita' la normalizzazione si riduce a una trasformazione
     affine y = gamma*(x-mean)/sqrt(var+eps) + beta con costanti fisse per
-    canale -- x*A + B, HE-compatibile nativamente. Come PolyAct, e'
-    pointwise: compatibile col tiling senza bisogno di rotazioni.
+    canale -- x*A + B, HE-compatibile nativamente e molto economica (nessun
+    calcolo aggiuntivo in inferenza). E' il vantaggio di costo che si perde
+    passando a instance_norm_per_instance(), da confrontare col vantaggio
+    di stabilita' (vedi discussione con Aurora sul trade-off).
 
     Args:
         x: (C, H, W)
@@ -236,4 +258,88 @@ def instance_norm_eval(x, running_mean, running_var, gamma, beta, eps=1e-5):
     out = np.zeros_like(x)
     for c in range(C):
         out[c] = gamma[c] * (x[c] - running_mean[c]) / np.sqrt(running_var[c] + eps) + beta[c]
+    return out
+
+
+def instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w, eps=1e-5):
+    """
+    InstanceNorm2d con statistiche PER-ISTANZA: media e varianza calcolate
+    LIVE sull'immagine corrente (il singolo paziente cifrato), non piu'
+    costanti di popolazione precalcolate. Questa e' ora la normalizzazione
+    di riferimento per il modello (norm_mode='per_instance' in models/
+    he_friendly.py) -- vedi CONTESTO_PROGETTO_TESI per la motivazione
+    completa: la normalizzazione di popolazione era la causa strutturale
+    dell'instabilita' di Fase III.
+
+    REALIZZAZIONE HE (solo primitive rotazione/somma/moltiplicazione),
+    in 4 passi -- ognuno commentato con l'operazione HE reale che
+    rappresenta, perche' la traduzione a FIDESlib (Fase 3D) sia diretta:
+
+    1. SOMMA ENTRO TILE: la somma di tutti i pixel di un tile (un
+       ciphertext) si ottiene con una riduzione rotate-and-add (EvalSum:
+       log2(n_slot) rotazioni + addizioni, non un operatore nativo di
+       "somma totale"). Qui usiamo np.sum: il RISULTATO numerico e'
+       identico indipendentemente da come si esegue la somma, cambia solo
+       il numero di operazioni HE necessarie -- corretto per un prototipo
+       di correttezza, la conta delle operazioni si affronta in Fase 3D.
+    2. SOMMA TRA TILE: dato che la griglia e' fissa (stessa forma per ogni
+       tile, vedi docstring del modulo), sommare gli scalari "somma-di-
+       tile" di canali corrispondenti tra tile diversi e' una normale
+       addizione tra ciphertext -- nessuna operazione nuova rispetto a
+       quelle gia' usate in tiled_conv2d.
+    3. VARIANZA: var = E[x^2] - E[x]^2. Richiede x*x (moltiplicazione
+       ciphertext-ciphertext, un livello moltiplicativo in piu' rispetto
+       al solo calcolo della media) prima della stessa riduzione del
+       punto 1-2.
+    4. 1/sqrt(var+eps): CKKS NON ha una radice quadrata nativa. Questo e'
+       il punto NON ancora HE-nativo di questa funzione -- serve
+       un'approssimazione dedicata (tipicamente iterazione di Newton-
+       Raphson, che converge in poche iterazioni se si conosce un range
+       plausibile per var+eps, o un fit polinomiale calibrato su quel
+       range). Qui usiamo np.sqrt in chiaro: e' un segnaposto esplicito,
+       da sostituire in Fase 3D insieme al dimensionamento della
+       profondita' moltiplicativa (lo schema MILP di Aurora per il
+       bootstrap placement dovra' includere anche il costo di questa
+       approssimazione, non solo quello di PolyAct).
+
+    Args:
+        x: (C, H, W) -- feature map della SINGOLA istanza (un paziente)
+        gamma, beta: (C,) -- parametri affine allenati (sempre HE-nativi,
+           invariati rispetto alla versione a statistiche di popolazione)
+        n_tiles_h, n_tiles_w: STESSA griglia fissa usata nel resto della rete
+        eps: costante di stabilita' numerica
+
+    Returns:
+        (C, H, W), normalizzato con statistiche calcolate su x stesso
+    """
+    C, H, W = x.shape
+    tile_h, tile_w = H // n_tiles_h, W // n_tiles_w
+    n_pixels = H * W  # costante nota a priori -> moltiplicazione per 1/n_pixels e' un cMult
+
+    out = np.zeros_like(x)
+    for c in range(C):
+        sum_x = 0.0
+        sum_x2 = 0.0
+        for ti in range(n_tiles_h):
+            for tj in range(n_tiles_w):
+                tile = x[c,
+                         ti * tile_h:(ti + 1) * tile_h,
+                         tj * tile_w:(tj + 1) * tile_w]
+                flat = tile.flatten()
+                # Passo 1: somma entro tile (in HE: EvalSum via rotate-and-add)
+                sum_x += np.sum(flat)
+                # x*x e' una cMult ciphertext-ciphertext; poi stessa riduzione
+                sum_x2 += np.sum(flat * flat)
+        # Passo 2 (somma tra tile) e' gia' inclusa sopra come normale
+        # accumulo scalare -- in HE, addizione tra i ciphertext "somma-di-
+        # tile" di ciascun tile (tutti della stessa forma per costruzione).
+        mean = sum_x / n_pixels
+        mean_sq = sum_x2 / n_pixels
+        var = mean_sq - mean * mean  # Passo 3
+
+        # Passo 4: NON ancora HE-nativo, vedi docstring.
+        inv_std = 1.0 / np.sqrt(var + eps)
+
+        out[c] = gamma[c] * (x[c] - mean) * inv_std + beta[c]
+
     return out
