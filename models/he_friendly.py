@@ -73,8 +73,43 @@ class PolyAct(nn.Module):
     clamp applicato a posteriori, e' un limite sul meccanismo stesso
     dell'effetto valanga. Se max_a e' None (default), 'a' resta un
     parametro libero come nel comportamento originale, invariato.
+
+    GATING MORBIDO SU 'a' (soft_max_a, richiesta di Aurora dopo la scoperta
+    dello squilibrio nei gradienti skip/upsampling): a differenza di
+    max_a (vincolo strutturale rigido, sempre attivo) e di act_overrides
+    (commutazione netta e permanente a grado 1 su interi blocchi, decisa
+    a priori), qui l'idea e' lasciare che ogni singola PolyAct si comporti
+    normalmente (quadratica piena) quando il suo 'a' resta in un range
+    sicuro, e "spegnersi" GRADUALMENTE verso un comportamento lineare
+    (bx+c) SOLO se 'a' cresce oltre una soglia -- durante il training,
+    layer per layer, senza deciderlo a priori su quali blocchi.
+
+    Implementato come un fattore di gate moltiplicato sul termine
+    quadratico: gate = sigmoid(soft_sharpness * (soft_max_a - |a|)).
+    Per |a| << soft_max_a, gate tende a 1 (quadratico pieno, comportamento
+    normale). Per |a| >> soft_max_a, gate tende a 0 (il termine ax^2
+    sparisce, resta bx+c). La transizione e' liscia e derivabile ovunque
+    (a differenza di un if/else netto, che introdurrebbe una discontinuita'
+    nel gradiente proprio nel punto critico in cui interviene) -- il
+    training non subisce salti improvvisi di comportamento.
+
+    soft_sharpness controlla quanto e' brusca la transizione: valori alti
+    (es. 20-50) la rendono quasi un interruttore netto ma ancora derivabile;
+    valori bassi (es. 2-5) la rendono molto graduale. Se soft_max_a e' None
+    (default), questo meccanismo e' completamente disattivato -- nessun
+    effetto sul comportamento originale, indipendentemente da max_a.
+
+    NOTA su HE: questo gating agisce SOLO sul valore di 'a' usato nel
+    forward durante il training. A fine training, ogni PolyAct ha
+    semplicemente i suoi coefficienti a,b,c fissi appresi (magari alcuni
+    con 'a' effettivamente vicino a zero se il gate si e' spento durante
+    l'apprendimento) -- l'inferenza HE resta identica a prima (stesso
+    identico polinomio ax^2+bx+c per layer, nessuna operazione aggiuntiva
+    da implementare in CKKS). Il gating e' un meccanismo di TRAINING, non
+    di inferenza.
     """
-    def __init__(self, clamp_value: float = 50.0, max_a: float = None):
+    def __init__(self, clamp_value: float = 50.0, max_a: float = None,
+                 soft_max_a: float = None, soft_sharpness: float = 10.0):
         super().__init__()
         self.max_a = max_a
         if max_a is None:
@@ -89,17 +124,33 @@ class PolyAct(nn.Module):
         self.b = nn.Parameter(torch.tensor(1.0))   # c1
         self.c = nn.Parameter(torch.tensor(0.5))   # c0
         self.clamp_value = clamp_value
+        self.soft_max_a = soft_max_a
+        self.soft_sharpness = soft_sharpness
 
     def current_a(self):
         """Valore effettivo di 'a' da usare nel forward e nella diagnostica,
-        sia in modalita' libera che vincolata."""
+        sia in modalita' libera che vincolata. NON include il gating morbido
+        (vedi effective_a_for_forward()) -- questo resta il valore "grezzo"
+        del coefficiente appreso, utile per diagnostica/logging inalterati."""
         if self.max_a is None:
             return self.a
         return self.max_a * torch.tanh(self.raw_a)
 
+    def gate_value(self):
+        """Il fattore di gate corrente (tra 0 e 1) applicato al termine
+        quadratico. Ritorna 1.0 (nessun effetto) se soft_max_a e' None.
+        Esposto separatamente dalla diagnostica, cosi' si puo' monitorare
+        QUANDO e DOVE il gate comincia a intervenire durante il training."""
+        if self.soft_max_a is None:
+            return torch.tensor(1.0)
+        a = self.current_a()
+        return torch.sigmoid(self.soft_sharpness * (self.soft_max_a - a.abs()))
+
     def forward(self, x):
         a = self.current_a()
-        out = a * x * x + self.b * x + self.c
+        gate = self.gate_value()
+        self.last_gate = gate.detach() if torch.is_tensor(gate) else gate
+        out = (gate * a) * x * x + self.b * x + self.c
         # Esposto per un'eventuale penalita' esplicita nella loss (proposta
         # di Aurora, alternativa/complementare allo straight-through
         # estimator): il gradiente resta attaccato, cosi' train.py puo'
@@ -216,16 +267,21 @@ class ConvBlock(nn.Module):
     norm_mode: 'population' (default, invariato) o 'per_instance' -- vedi
     get_norm() per i dettagli. Propagato identico a entrambe le Norm del
     blocco.
+
+    soft_max_a, soft_sharpness: propagati identici a entrambe le PolyAct
+    del blocco -- vedi PolyAct per la spiegazione del gating morbido.
     """
     def __init__(self, in_ch, out_ch, stride=1,
                  norm_type='none', act_type='poly', clamp_values=None,
-                 norm_mode='population', max_a=None):
+                 norm_mode='population', max_a=None,
+                 soft_max_a=None, soft_sharpness=10.0):
         super().__init__()
         Act = ACTIVATIONS[act_type]
 
         def make_act():
             if act_type == 'poly':
-                kwargs = {'max_a': max_a}
+                kwargs = {'max_a': max_a, 'soft_max_a': soft_max_a,
+                         'soft_sharpness': soft_sharpness}
                 if clamp_values is not None:
                     idx = make_act.counter
                     make_act.counter += 1
@@ -264,11 +320,13 @@ class HEFriendlyUNet(nn.Module):
         act_type:     'identity' | 'linear' | 'squared' | 'poly'
         norm_type:    'none' | 'batch' | 'instance'
         norm_mode:    'population' | 'per_instance' (vedi get_norm())
+        skip_mode:    'concat' | 'sum' (vedi sotto)
     """
 
     def __init__(self, in_channels=1, num_classes=4,
                  act_type='poly', norm_type='none', clamp_values=None,
-                 norm_mode='population', max_a_poly=None, act_overrides=None):
+                 norm_mode='population', max_a_poly=None, act_overrides=None,
+                 soft_max_a=None, soft_sharpness=10.0, skip_mode='concat'):
         """
         clamp_values: dizionario opzionale {nome_layer: soglia}, con chiavi
         del tipo 'enc0.block.2', 'enc0.block.5', ecc. (lo stesso formato
@@ -314,6 +372,46 @@ class HEFriendlyUNet(nn.Module):
         code pesanti che il clamp deve tagliare. Rimuovere il quadratico
         alla radice in quei layer specifici attacca il meccanismo, non il
         sintomo.
+
+        soft_max_a, soft_sharpness: propagati a ogni PolyAct della rete --
+        vedi PolyAct per la spiegazione completa del gating morbido
+        (richiesta di Aurora: lasciare che ogni layer si comporti in modo
+        quadratico pieno quando 'a' resta in un range sicuro, e "spegnersi"
+        gradualmente verso un comportamento lineare SOLO se 'a' cresce
+        troppo, invece di decidere a priori quali blocchi rendere lineari
+        come fa act_overrides). Default None: nessun effetto, comportamento
+        originale invariato.
+
+        skip_mode: 'concat' (default, invariato -- comportamento originale:
+        le skip connection vengono concatenate lungo i canali, che vengono
+        poi raddoppiati prima di ogni ConvBlock del decoder) oppure 'sum'
+        (le skip connection vengono SOMMATE invece di concatenate).
+
+        Motivazione per 'sum' (scoperta con crypto/analyze_decoder_
+        gradients.py): con la concatenazione, il gradiente che arriva al
+        punto di unione dal ramo di upsampling e quello che arriva dalla
+        skip connection possono avere magnitudini molto diverse -- misurato
+        fino a un rapporto di ~14:1 nell'ultimo stage del decoder (dec0),
+        crescente progressivamente lungo tutto il decoder. Con la somma,
+        per costruzione matematica (derivata di una somma), i due
+        contributi ricevono ESATTAMENTE lo stesso gradiente nel punto di
+        unione -- elimina lo squilibrio strutturalmente, non solo lo
+        attenua. Bonus: dato che nell'architettura attuale il numero di
+        canali dell'upsampling e della skip coincidono gia' esattamente ad
+        ogni stage (es. up4 produce filters[4] canali, e4 ne ha altrettanti
+        -- verificato, nessuna conv 1x1 di adattamento necessaria), la
+        somma NON raddoppia i canali come fa la concatenazione: ogni
+        ConvBlock del decoder riceve meta' dei canali in ingresso rispetto
+        a 'concat' (es. filters[4] invece di filters[4]+filters[4] per
+        dec4) -- meno parametri, e in prospettiva HE meno ciphertext da
+        gestire ad ogni stage del decoder.
+
+        ATTENZIONE: 'sum' cambia il numero di canali in ingresso ai
+        ConvBlock del decoder -- un checkpoint allenato con skip_mode=
+        'concat' NON e' compatibile con un modello costruito con skip_
+        mode='sum' (le shape dei pesi della prima Conv2d di ogni blocco
+        decoder non coincidono). Va riallenato da zero, non caricato via
+        --init_from/--pretrained da un checkpoint 'concat' esistente.
         """
         super().__init__()
 
@@ -322,6 +420,11 @@ class HEFriendlyUNet(nn.Module):
         self.norm_mode = norm_mode
         self.max_a_poly = max_a_poly
         self.act_overrides = act_overrides or {}
+        self.soft_max_a = soft_max_a
+        self.soft_sharpness = soft_sharpness
+        if skip_mode not in ('concat', 'sum'):
+            raise ValueError(f"skip_mode deve essere 'concat' o 'sum', ricevuto: {skip_mode}")
+        self.skip_mode = skip_mode
 
         def block_act_type(block_name):
             """Ritorna act_type globale, a meno che act_overrides non lo
@@ -343,53 +446,78 @@ class HEFriendlyUNet(nn.Module):
         # Encoder
         self.enc0 = ConvBlock(in_channels, filters[0], stride=1,
                               norm_type=norm_type, act_type=block_act_type('enc0'), clamp_values=cv('enc0'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
         self.enc1 = ConvBlock(filters[0], filters[1], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc1'), clamp_values=cv('enc1'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
         self.enc2 = ConvBlock(filters[1], filters[2], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc2'), clamp_values=cv('enc2'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
         self.enc3 = ConvBlock(filters[2], filters[3], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc3'), clamp_values=cv('enc3'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
         self.enc4 = ConvBlock(filters[3], filters[4], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc4'), clamp_values=cv('enc4'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
         self.enc5 = ConvBlock(filters[4], filters[5], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc5'), clamp_values=cv('enc5'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
 
         # Decoder
         Act = ACTIVATIONS[act_type]
 
+        # Con skip_mode='sum', il numero di canali in ingresso a ogni
+        # ConvBlock del decoder e' filters[i] (non filters[i]+filters[i])
+        # perche' upsampling e skip vengono sommati, non concatenati -- i
+        # loro canali coincidono gia' (verificato: up4 produce filters[4],
+        # e4 ne ha altrettanti; stessa cosa per ogni altro stage).
+        dec_in_mult = 1 if skip_mode == 'sum' else 2
+
         self.up4 = nn.ConvTranspose2d(filters[5], filters[4], 2, stride=2)
-        self.dec4 = ConvBlock(filters[4] + filters[4], filters[4],
+        self.dec4 = ConvBlock(filters[4] * dec_in_mult, filters[4],
                               norm_type=norm_type, act_type=block_act_type('dec4'), clamp_values=cv('dec4'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
 
         self.up3 = nn.ConvTranspose2d(filters[4], filters[3], 2, stride=2)
-        self.dec3 = ConvBlock(filters[3] + filters[3], filters[3],
+        self.dec3 = ConvBlock(filters[3] * dec_in_mult, filters[3],
                               norm_type=norm_type, act_type=block_act_type('dec3'), clamp_values=cv('dec3'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
 
         self.up2 = nn.ConvTranspose2d(filters[3], filters[2], 2, stride=2)
-        self.dec2 = ConvBlock(filters[2] + filters[2], filters[2],
+        self.dec2 = ConvBlock(filters[2] * dec_in_mult, filters[2],
                               norm_type=norm_type, act_type=block_act_type('dec2'), clamp_values=cv('dec2'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
 
         self.up1 = nn.ConvTranspose2d(filters[2], filters[1], 2, stride=2)
-        self.dec1 = ConvBlock(filters[1] + filters[1], filters[1],
+        self.dec1 = ConvBlock(filters[1] * dec_in_mult, filters[1],
                               norm_type=norm_type, act_type=block_act_type('dec1'), clamp_values=cv('dec1'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
 
         self.up0 = nn.ConvTranspose2d(filters[1], filters[0], 2, stride=2)
-        self.dec0 = ConvBlock(filters[0] + filters[0], filters[0],
+        self.dec0 = ConvBlock(filters[0] * dec_in_mult, filters[0],
                               norm_type=norm_type, act_type=block_act_type('dec0'), clamp_values=cv('dec0'),
-                              norm_mode=norm_mode, max_a=max_a_poly)
+                              norm_mode=norm_mode, max_a=max_a_poly,
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
 
         # Output
         self.out_conv = nn.Conv2d(filters[0], num_classes, 1)
+
+    def _combine_skip(self, upsampled, skip):
+        """Unisce il ramo di upsampling con la skip connection, secondo
+        skip_mode -- vedi docstring della classe per la motivazione."""
+        if self.skip_mode == 'sum':
+            return upsampled + skip
+        return torch.cat([upsampled, skip], dim=1)
 
     def forward(self, x):
         # Encoder
@@ -401,11 +529,11 @@ class HEFriendlyUNet(nn.Module):
         e5 = self.enc5(e4)
 
         # Decoder with skip connections
-        d4 = self.dec4(torch.cat([self.up4(e5), e4], dim=1))
-        d3 = self.dec3(torch.cat([self.up3(d4), e3], dim=1))
-        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
-        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
-        d0 = self.dec0(torch.cat([self.up0(d1), e0], dim=1))
+        d4 = self.dec4(self._combine_skip(self.up4(e5), e4))
+        d3 = self.dec3(self._combine_skip(self.up3(d4), e3))
+        d2 = self.dec2(self._combine_skip(self.up2(d3), e2))
+        d1 = self.dec1(self._combine_skip(self.up1(d2), e1))
+        d0 = self.dec0(self._combine_skip(self.up0(d1), e0))
 
         return self.out_conv(d0)
 
@@ -431,3 +559,28 @@ if __name__ == '__main__':
           m_pop.enc0.block[1].track_running_stats)   # atteso: True
     print('norm_mode=per_instance -> track_running_stats =',
           m_pi.enc0.block[1].track_running_stats)     # atteso: False
+
+    # Sanity check skip_mode='sum': meno parametri di 'concat' (canali dimezzati nel decoder)
+    m_concat = HEFriendlyUNet(act_type='poly', norm_type='instance', skip_mode='concat')
+    m_sum = HEFriendlyUNet(act_type='poly', norm_type='instance', skip_mode='sum')
+    p_concat = sum(p.numel() for p in m_concat.parameters())
+    p_sum = sum(p.numel() for p in m_sum.parameters())
+    print(f'skip_mode=concat -> params={p_concat:,}')
+    print(f'skip_mode=sum    -> params={p_sum:,}  (atteso: meno di concat)')
+    x = torch.randn(1, 1, 256, 224)
+    y_sum = m_sum(x)
+    print(f'skip_mode=sum forward OK, output shape={tuple(y_sum.shape)}')
+
+    # Sanity check soft_max_a: il gate deve essere vicino a 1 per 'a' piccolo,
+    # vicino a 0 per 'a' molto oltre la soglia
+    m_soft = HEFriendlyUNet(act_type='poly', norm_type='instance',
+                            soft_max_a=0.2, soft_sharpness=30.0)
+    x = torch.randn(1, 1, 256, 224)
+    y_soft = m_soft(x)
+    example_act = m_soft.enc0.block[2]
+    print(f'soft_max_a=0.2, a iniziale=0.1 -> gate={example_act.gate_value().item():.4f} '
+          f'(atteso: vicino a 1, a e\' sotto la soglia)')
+    with torch.no_grad():
+        example_act.a.fill_(0.5)  # ben oltre la soglia 0.2
+    print(f'soft_max_a=0.2, a forzato a 0.5 -> gate={example_act.gate_value().item():.4f} '
+          f'(atteso: vicino a 0, a e\' ben oltre la soglia)')

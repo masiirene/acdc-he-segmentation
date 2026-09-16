@@ -190,6 +190,12 @@ def collect_polyact_diagnostics(model):
       - a, b, c: i coefficienti imparabili del polinomio ax^2+bx+c. 'a' e'
         il piu' importante da sorvegliare: anche una piccola crescita qui
         amplifica esponenzialmente l'effetto valanga in cascata.
+      - gate: il fattore di gating morbido corrente (vedi PolyAct.
+        soft_max_a) -- 1.0 se il meccanismo e' disattivato o se 'a' e'
+        ancora ben dentro la soglia sicura; scende verso 0 se 'a' sta
+        crescendo oltre soft_max_a, segno che quel layer specifico si sta
+        "auto-limitando" verso un comportamento lineare durante il
+        training.
       - raw_mean/raw_std/raw_max_abs/raw_p99_abs: statistiche del valore
         GREZZO pre-clamp (.last_raw, esposto dal forward di PolyAct)
         sull'ultimo batch di training. Se raw_p99_abs cresce epoca dopo
@@ -210,6 +216,9 @@ def collect_polyact_diagnostics(model):
                 'c': m.c.item(),
                 'clamp_value': m.clamp_value,
             }
+            if hasattr(m, 'last_gate') and m.last_gate is not None:
+                gate_val = m.last_gate
+                entry['gate'] = gate_val.item() if torch.is_tensor(gate_val) else gate_val
             if hasattr(m, 'last_raw') and m.last_raw is not None:
                 raw = m.last_raw.detach()
                 flat = raw.flatten().abs()
@@ -314,11 +323,12 @@ def load_checkpoint_shape_safe(model, state):
     (genera comunque un RuntimeError).
 
     Necessario da quando alcuni blocchi possono usare LinearAct al posto
-    di PolyAct (--degree1_layers): entrambi hanno un parametro chiamato
-    'a', ma PolyAct.a e' scalare (shape []) mentre LinearAct.a ha shape
-    [1] -- stesso nome, forma incompatibile. Un caricamento naive
-    (model.load_state_dict(state, strict=False)) solleva comunque
-    l'errore in questo caso, perche' la chiave "esiste" in entrambi.
+    di PolyAct (--degree1_layers), o quando cambia skip_mode (che cambia
+    il numero di canali in ingresso ai ConvBlock del decoder): entrambi
+    producono chiavi con nome uguale ma forma incompatibile. Un
+    caricamento naive (model.load_state_dict(state, strict=False)) solleva
+    comunque l'errore in questo caso, perche' la chiave "esiste" in
+    entrambi.
 
     Ritorna (n_loaded, skipped_shape, skipped_missing_in_model,
     kept_at_init) per una diagnostica chiara di cosa e' successo:
@@ -326,7 +336,8 @@ def load_checkpoint_shape_safe(model, state):
         checkpoint
       - skipped_shape: lista di (nome, forma_checkpoint, forma_modello)
         per le chiavi con nome uguale ma forma incompatibile (es. i layer
-        passati a --degree1_layers)
+        passati a --degree1_layers, o l'intero decoder se skip_mode
+        differisce tra checkpoint e modello attuale)
       - skipped_missing_in_model: chiavi presenti nel checkpoint ma senza
         posto nel modello attuale (es. buffer di popolazione con
         norm_mode=per_instance)
@@ -463,6 +474,18 @@ def train(args):
         print(f'Attivazione forzata a grado 1 (linear, ax+b) nei layer: {layer_names}')
         print('  (tutti gli altri layer restano act_type={} come da --act)'.format(args.act))
 
+    if args.soft_max_a is not None:
+        print(f'Gating morbido attivo su PolyAct: soft_max_a={args.soft_max_a}, '
+              f'soft_sharpness={args.soft_sharpness}')
+        print('  (ogni layer si comporta quadratico pieno se |a| resta sotto la soglia,')
+        print('   si "spegne" gradualmente verso lineare se |a| la supera)')
+
+    if args.skip_mode == 'sum':
+        print('skip_mode=sum: le skip connection vengono SOMMATE invece di concatenate')
+        print('  (elimina lo squilibrio di gradiente upsampling/skip misurato con')
+        print('   crypto/analyze_decoder_gradients.py -- ATTENZIONE: incompatibile con')
+        print('   checkpoint allenati con skip_mode=concat, richiede training da zero)')
+
     model = HEFriendlyUNet(
         in_channels=1,
         num_classes=4,
@@ -471,11 +494,15 @@ def train(args):
         clamp_values=clamp_values,
         norm_mode=args.norm_mode,
         max_a_poly=args.max_a_poly,
-        act_overrides=act_overrides
+        act_overrides=act_overrides,
+        soft_max_a=args.soft_max_a,
+        soft_sharpness=args.soft_sharpness,
+        skip_mode=args.skip_mode,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f'Model: act={args.act}, norm={args.norm}, norm_mode={args.norm_mode}, params={n_params:,}')
+    print(f'Model: act={args.act}, norm={args.norm}, norm_mode={args.norm_mode}, '
+          f'skip_mode={args.skip_mode}, params={n_params:,}')
 
     # --- Caricamento pesi iniziali ---
     # --pretrained: solo le Conv2d dal baseline nnU-Net (usato in Fase II,
@@ -489,9 +516,11 @@ def train(args):
         state = torch.load(args.init_from, map_location=device, weights_only=False)
         # load_checkpoint_shape_safe: come strict=False, ma gestisce anche
         # chiavi con nome uguale e forma diversa (es. PolyAct.a scalare vs
-        # LinearAct.a shape [1], quando --degree1_layers cambia il tipo di
-        # attivazione in alcuni blocchi) -- strict=False da solo NON basta
-        # in quel caso, solleva comunque RuntimeError.
+        # LinearAct.a shape [1] quando --degree1_layers cambia il tipo di
+        # attivazione in alcuni blocchi, oppure l'intero decoder se
+        # skip_mode differisce tra checkpoint e modello attuale) --
+        # strict=False da solo NON basta in questi casi, solleva comunque
+        # RuntimeError.
         n_loaded, skipped_shape, skipped_missing, kept_at_init = \
             load_checkpoint_shape_safe(model, state)
         print(f'  {n_loaded} parametri caricati dal checkpoint')
@@ -572,13 +601,15 @@ def train(args):
 
     criterion = DiceCELoss(num_classes=4)
 
-    run_name = f'act={args.act}_norm={args.norm}_mode={args.norm_mode}_bs{args.batch_size}_lr{args.lr}'
+    run_name = f'act={args.act}_norm={args.norm}_mode={args.norm_mode}_skip-{args.skip_mode}_bs{args.batch_size}_lr{args.lr}'
     if args.lr_schedule != 'constant':
         run_name += f'_sched-{args.lr_schedule}'
     if args.freeze:
         run_name += f'_freeze-{args.freeze.replace(",", "-")}'
     if args.warmup > 0:
         run_name += f'_warmup{args.warmup}'
+    if args.soft_max_a is not None:
+        run_name += f'_softmaxa{args.soft_max_a}'
     out_dir = os.path.join(args.out_dir, run_name)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -671,6 +702,13 @@ def train(args):
                       f'max|a|={max_a:.4f} ({max_a_layer})  '
                       f'max_raw_p99={max_p99:.2f} ({max_p99_layer})  '
                       f'max_raw_ABS={max_abs:.2f} ({max_abs_layer})')
+
+                if args.soft_max_a is not None:
+                    gates = {k: v.get('gate', 1.0) for k, v in diag['polyact'].items()}
+                    min_gate_layer = min(gates.items(), key=lambda kv: kv[1])
+                    n_gated = sum(1 for g in gates.values() if g < 0.9)
+                    print(f'  [diag] gate minimo: {min_gate_layer[1]:.4f} ({min_gate_layer[0]})  '
+                          f'-- {n_gated}/{len(gates)} layer con gate<0.9 (parzialmente "spenti")')
             else:
                 # Nessuna PolyAct nel modello (es. --act linear su tutta la
                 # rete): non c'e' nulla da riportare su 'a'/raw pre-clamp,
@@ -815,6 +853,21 @@ if __name__ == '__main__':
                              "immagine, sia in train che in eval (track_running_stats=False) -- vedi "
                              "crypto/check_per_instance_norm.py per la motivazione e i risultati "
                              "(risolve l'esplosione numerica alla radice e migliora il Dice).")
+    parser.add_argument('--skip_mode', default='concat', choices=['concat', 'sum'],
+                        help="'concat' (default, invariato): le skip connection vengono concatenate "
+                             "lungo i canali, che vengono raddoppiati prima di ogni ConvBlock del "
+                             "decoder -- comportamento originale. 'sum': le skip connection vengono "
+                             "SOMMATE invece di concatenate. Motivazione (crypto/analyze_decoder_"
+                             "gradients.py): con 'concat' il gradiente che arriva al punto di unione "
+                             "dal ramo di upsampling e quello dalla skip possono differire fino a "
+                             "~14:1 nell'ultimo stage del decoder -- con 'sum', per costruzione "
+                             "matematica, i due contributi ricevono sempre lo stesso gradiente. "
+                             "Bonus: dato che i canali di upsampling e skip coincidono gia' ad ogni "
+                             "stage, 'sum' non raddoppia i canali come 'concat' -- meno parametri nel "
+                             "decoder. ATTENZIONE: un checkpoint allenato con 'concat' non e' "
+                             "compatibile con un modello 'sum' (shape diverse nella prima Conv2d di "
+                             "ogni blocco decoder) -- richiede training da zero, non caricabile via "
+                             "--init_from/--pretrained da un checkpoint 'concat' esistente.")
     parser.add_argument('--max_a_poly', type=float, default=None,
                         help="Se omesso (default, invariato): il coefficiente 'a' (termine quadratico) "
                              "di ogni PolyAct resta un parametro libero, comportamento originale. Se "
@@ -824,6 +877,25 @@ if __name__ == '__main__':
                              "tetto fisso, attaccando l'effetto valanga (ax^2+bx+c non limitata) alla "
                              "radice invece di limitarsi a tagliare l'output dopo il fatto (clamp/STE). "
                              "Vedi PolyAct.current_a() in models/he_friendly.py.")
+    parser.add_argument('--soft_max_a', type=float, default=None,
+                        help="Se omesso (default, invariato): nessun gating morbido, comportamento "
+                             "originale. Se specificato (es. 0.2): ogni PolyAct applica un fattore di "
+                             "gate (tra 0 e 1, sigmoid) al proprio termine quadratico -- vicino a 1 "
+                             "(quadratico pieno) se |a| resta sotto soft_max_a, vicino a 0 (comportamento "
+                             "lineare, bx+c) se |a| lo supera. A differenza di --max_a_poly (vincolo "
+                             "rigido strutturale, sempre attivo) e di --degree1_layers (commutazione "
+                             "netta e permanente a priori su blocchi scelti), qui la transizione e' "
+                             "MORBIDA e derivabile ovunque (nessuna discontinuita' nel gradiente), e "
+                             "avviene layer per layer durante il training in base a come si comporta "
+                             "ciascuno, non decisa in anticipo su quali blocchi. Richiesta di Aurora, "
+                             "dopo la scoperta dello squilibrio nei gradienti skip/upsampling (vedi "
+                             "--skip_mode) -- l'idea e' lasciare che PolyAct 'si auto-limiti' solo dove "
+                             "e quando serve davvero. Vedi PolyAct.gate_value() in models/he_friendly.py.")
+    parser.add_argument('--soft_sharpness', type=float, default=10.0,
+                        help="Controlla quanto e' brusca la transizione del gating morbido (solo se "
+                             "--soft_max_a e' specificato, altrimenti ignorato). Valori alti (20-50): "
+                             "transizione quasi netta ma ancora derivabile. Valori bassi (2-5): "
+                             "transizione molto graduale. Default 10.0.")
     parser.add_argument('--reset_poly_a', action='store_true',
                         help="Se presente, forza 'a'=0.1 su ogni PolyAct DOPO aver caricato --init_from, "
                              "anche in modalita' libera (max_a_poly=None), dove altrimenti il checkpoint "
