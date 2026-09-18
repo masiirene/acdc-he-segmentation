@@ -253,6 +253,60 @@ def get_norm(norm_type: str, num_features: int, norm_mode: str = 'population'):
 
 
 # ---------------------------------------------------------------------------
+# Weight Standardization (Qiao et al., 2019) -- opzionale
+# ---------------------------------------------------------------------------
+
+class WSConv2d(nn.Conv2d):
+    def __init__(self, *args, gain_floor: float = 0.05, **kwargs):
+        """
+        gain_floor: valore minimo strutturale per 'gain' (vedi forward).
+        Impedisce al gain di collassare verso zero durante il training --
+        motivato dalla scoperta empirica (crypto/check_ws_sum_norm_collapse.py)
+        che un gain libero puo' scivolare fino a ~2e-5 su singoli canali,
+        producendo un'uscita quasi costante che fa collassare la varianza
+        per-istanza della InstanceNorm successiva (0 -> 1/sqrt(var) esplode).
+        """
+        super().__init__(*args, **kwargs)
+        self.gain_floor = gain_floor
+        # raw_gain e' il parametro libero; gain effettivo = gain_floor + softplus(raw_gain)
+        # softplus è sempre >= 0, quindi gain >= gain_floor SEMPRE, qualunque
+        # gradiente proponga l'ottimizzatore -- stesso principio di max_a/tanh.
+        self.raw_gain = nn.Parameter(torch.zeros(self.out_channels))
+
+    def effective_gain(self):
+        return self.gain_floor + nn.functional.softplus(self.raw_gain)
+
+    def forward(self, x):
+        w = self.weight
+        out_ch = w.shape[0]
+        w_flat = w.reshape(out_ch, -1)
+        mean = w_flat.mean(dim=1, keepdim=True)
+        std = w_flat.std(dim=1, keepdim=True, unbiased=False)
+        w_std = (w_flat - mean) / (std + 1e-5)
+        w_std = w_std * self.effective_gain().view(-1, 1)
+        w_std = w_std.reshape(w.shape)
+        return nn.functional.conv2d(x, w_std, self.bias, self.stride,
+                                     self.padding, self.dilation, self.groups)
+
+
+def calibrate_ws_gain(model):
+    """Aggiornata per la riparametrizzazione gain_floor + softplus(raw_gain):
+    calibra raw_gain tramite la softplus INVERSA, cosi' il gain effettivo
+    iniziale coincide comunque con lo std originale dei pesi caricati
+    (stesso comportamento di prima, stesso obiettivo -- evitare lo shock
+    iniziale), ma ora 'gain' non potra' mai scendere sotto gain_floor."""
+    with torch.no_grad():
+        for m in model.modules():
+            if isinstance(m, WSConv2d):
+                w_flat = m.weight.reshape(m.out_channels, -1)
+                target_gain = w_flat.std(dim=1, unbiased=False)
+                # softplus_inv(y) = log(exp(y) - 1), con clamp per stabilita' numerica
+                # quando target_gain e' vicino o sotto gain_floor.
+                delta = torch.clamp(target_gain - m.gain_floor, min=1e-6)
+                m.raw_gain.copy_(torch.log(torch.expm1(delta)))
+
+
+# ---------------------------------------------------------------------------
 # Basic building block
 # ---------------------------------------------------------------------------
 
@@ -270,13 +324,19 @@ class ConvBlock(nn.Module):
 
     soft_max_a, soft_sharpness: propagati identici a entrambe le PolyAct
     del blocco -- vedi PolyAct per la spiegazione del gating morbido.
+
+    weight_standardization: se True, entrambe le Conv2d del blocco usano
+    WSConv2d invece di nn.Conv2d -- vedi WSConv2d per la motivazione.
+    Default False (invariato, comportamento originale).
     """
     def __init__(self, in_ch, out_ch, stride=1,
                  norm_type='none', act_type='poly', clamp_values=None,
                  norm_mode='population', max_a=None,
-                 soft_max_a=None, soft_sharpness=10.0):
+                 soft_max_a=None, soft_sharpness=10.0,
+                 weight_standardization=False):
         super().__init__()
         Act = ACTIVATIONS[act_type]
+        Conv = WSConv2d if weight_standardization else nn.Conv2d
 
         def make_act():
             if act_type == 'poly':
@@ -291,10 +351,10 @@ class ConvBlock(nn.Module):
         make_act.counter = 0
 
         self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=True),
+            Conv(in_ch, out_ch, 3, stride=stride, padding=1, bias=True),
             get_norm(norm_type, out_ch, norm_mode),
             make_act(),
-            nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1, bias=True),
+            Conv(out_ch, out_ch, 3, stride=1, padding=1, bias=True),
             get_norm(norm_type, out_ch, norm_mode),
             make_act(),
         )
@@ -326,8 +386,20 @@ class HEFriendlyUNet(nn.Module):
     def __init__(self, in_channels=1, num_classes=4,
                  act_type='poly', norm_type='none', clamp_values=None,
                  norm_mode='population', max_a_poly=None, act_overrides=None,
-                 soft_max_a=None, soft_sharpness=10.0, skip_mode='concat'):
+                 soft_max_a=None, soft_sharpness=10.0, skip_mode='concat',
+                 weight_standardization=False):
         """
+        weight_standardization: se True (default False, invariato), ogni
+        Conv2d "normale" della rete (dentro i ConvBlock di encoder/decoder,
+        e il layer di output finale) usa WSConv2d invece di nn.Conv2d --
+        vedi WSConv2d per la motivazione completa. Le ConvTranspose2d di
+        upsampling (up4..up0) NON sono affette (scelta di scope, vedi
+        WSConv2d). A differenza di skip_mode, questo NON cambia la forma
+        dei pesi -- un checkpoint allenato senza WS resta caricabile in un
+        modello con WS attivata (e viceversa) senza errori di shape, ma il
+        comportamento numerico cambia, quindi le prestazioni vanno
+        riverificate.
+
         clamp_values: dizionario opzionale {nome_layer: soglia}, con chiavi
         del tipo 'enc0.block.2', 'enc0.block.5', ecc. (lo stesso formato
         prodotto da crypto/calibrate_clamp_threshold.py). Se None, ogni
@@ -425,6 +497,7 @@ class HEFriendlyUNet(nn.Module):
         if skip_mode not in ('concat', 'sum'):
             raise ValueError(f"skip_mode deve essere 'concat' o 'sum', ricevuto: {skip_mode}")
         self.skip_mode = skip_mode
+        self.weight_standardization = weight_standardization
 
         def block_act_type(block_name):
             """Ritorna act_type globale, a meno che act_overrides non lo
@@ -447,27 +520,33 @@ class HEFriendlyUNet(nn.Module):
         self.enc0 = ConvBlock(in_channels, filters[0], stride=1,
                               norm_type=norm_type, act_type=block_act_type('enc0'), clamp_values=cv('enc0'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
         self.enc1 = ConvBlock(filters[0], filters[1], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc1'), clamp_values=cv('enc1'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
         self.enc2 = ConvBlock(filters[1], filters[2], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc2'), clamp_values=cv('enc2'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
         self.enc3 = ConvBlock(filters[2], filters[3], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc3'), clamp_values=cv('enc3'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
         self.enc4 = ConvBlock(filters[3], filters[4], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc4'), clamp_values=cv('enc4'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
         self.enc5 = ConvBlock(filters[4], filters[5], stride=2,
                               norm_type=norm_type, act_type=block_act_type('enc5'), clamp_values=cv('enc5'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
 
         # Decoder
         Act = ACTIVATIONS[act_type]
@@ -483,34 +562,40 @@ class HEFriendlyUNet(nn.Module):
         self.dec4 = ConvBlock(filters[4] * dec_in_mult, filters[4],
                               norm_type=norm_type, act_type=block_act_type('dec4'), clamp_values=cv('dec4'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
 
         self.up3 = nn.ConvTranspose2d(filters[4], filters[3], 2, stride=2)
         self.dec3 = ConvBlock(filters[3] * dec_in_mult, filters[3],
                               norm_type=norm_type, act_type=block_act_type('dec3'), clamp_values=cv('dec3'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
 
         self.up2 = nn.ConvTranspose2d(filters[3], filters[2], 2, stride=2)
         self.dec2 = ConvBlock(filters[2] * dec_in_mult, filters[2],
                               norm_type=norm_type, act_type=block_act_type('dec2'), clamp_values=cv('dec2'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
 
         self.up1 = nn.ConvTranspose2d(filters[2], filters[1], 2, stride=2)
         self.dec1 = ConvBlock(filters[1] * dec_in_mult, filters[1],
                               norm_type=norm_type, act_type=block_act_type('dec1'), clamp_values=cv('dec1'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
 
         self.up0 = nn.ConvTranspose2d(filters[1], filters[0], 2, stride=2)
         self.dec0 = ConvBlock(filters[0] * dec_in_mult, filters[0],
                               norm_type=norm_type, act_type=block_act_type('dec0'), clamp_values=cv('dec0'),
                               norm_mode=norm_mode, max_a=max_a_poly,
-                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness)
+                              soft_max_a=soft_max_a, soft_sharpness=soft_sharpness,
+                              weight_standardization=weight_standardization)
 
         # Output
-        self.out_conv = nn.Conv2d(filters[0], num_classes, 1)
+        OutConv = WSConv2d if weight_standardization else nn.Conv2d
+        self.out_conv = OutConv(filters[0], num_classes, 1)
 
     def _combine_skip(self, upsampled, skip):
         """Unisce il ramo di upsampling con la skip connection, secondo
@@ -584,3 +669,26 @@ if __name__ == '__main__':
         example_act.a.fill_(0.5)  # ben oltre la soglia 0.2
     print(f'soft_max_a=0.2, a forzato a 0.5 -> gate={example_act.gate_value().item():.4f} '
           f'(atteso: vicino a 0, a e\' ben oltre la soglia)')
+
+    # Sanity check weight_standardization: forward funzionante, stessa forma
+    # dei pesi di un modello senza WS (compatibilita' di caricamento), ma
+    # output numericamente diverso (i pesi vengono standardizzati al volo)
+    m_no_ws = HEFriendlyUNet(act_type='poly', norm_type='instance', weight_standardization=False)
+    m_ws = HEFriendlyUNet(act_type='poly', norm_type='instance', weight_standardization=True)
+    same_shape = m_no_ws.enc0.block[0].weight.shape == m_ws.enc0.block[0].weight.shape
+    print(f'\nweight_standardization: stessa forma dei pesi (enc0 conv1) = {same_shape} '
+          f'(atteso: True -- compatibilita\' di caricamento checkpoint)')
+    x = torch.randn(1, 1, 256, 224)
+    y_ws = m_ws(x)
+    print(f'weight_standardization=True forward OK, output shape={tuple(y_ws.shape)}')
+    # Verifica diretta che WSConv2d standardizzi davvero: media~0, std~1 per canale
+    with torch.no_grad():
+        conv = m_ws.enc0.block[0]
+        w_flat = conv.weight.reshape(conv.weight.shape[0], -1)
+        mean = w_flat.mean(dim=1)
+        std = w_flat.std(dim=1, unbiased=False)
+        w_standardized = (w_flat - mean.unsqueeze(1)) / (std.unsqueeze(1) + 1e-5)
+    print(f'WSConv2d: media pesi standardizzati per canale (primi 3) = '
+          f'{w_standardized.mean(dim=1)[:3].tolist()} (atteso: vicino a 0)')
+    print(f'WSConv2d: std pesi standardizzati per canale (primi 3) = '
+          f'{w_standardized.std(dim=1, unbiased=False)[:3].tolist()} (atteso: vicino a 1)')

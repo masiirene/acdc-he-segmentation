@@ -486,6 +486,12 @@ def train(args):
         print('   crypto/analyze_decoder_gradients.py -- ATTENZIONE: incompatibile con')
         print('   checkpoint allenati con skip_mode=concat, richiede training da zero)')
 
+    if args.weight_standardization:
+        print('weight_standardization=True: le Conv2d normali (non le ConvTranspose2d')
+        print('  di upsampling) standardizzano i propri pesi ad ogni forward -- nessun')
+        print('  costo aggiuntivo in HE (trasformazione sui pesi, non sulle attivazioni).')
+        print('  Compatibile con checkpoint esistenti (stessa forma dei pesi).')
+
     model = HEFriendlyUNet(
         in_channels=1,
         num_classes=4,
@@ -498,6 +504,7 @@ def train(args):
         soft_max_a=args.soft_max_a,
         soft_sharpness=args.soft_sharpness,
         skip_mode=args.skip_mode,
+        weight_standardization=args.weight_standardization,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -532,6 +539,10 @@ def train(args):
         print(f'  ({len(skipped_missing)} buffer/chiavi senza posto nel modello attuale ignorati, '
               f'attesi con norm_mode=per_instance)')
         print(f'Modello inizializzato da: {args.init_from}')
+    if args.weight_standardization:
+        from models.he_friendly import calibrate_ws_gain
+        calibrate_ws_gain(model)
+        print('WS gain calibrato sui pesi caricati (evita shock iniziale)')
 
         # --- Reset esplicito del coefficiente 'a' di ogni PolyAct ---
         # Necessario per un confronto sperimentale pulito tra "vincolo
@@ -610,6 +621,8 @@ def train(args):
         run_name += f'_warmup{args.warmup}'
     if args.soft_max_a is not None:
         run_name += f'_softmaxa{args.soft_max_a}'
+    if args.weight_standardization:
+        run_name += '_ws'
     out_dir = os.path.join(args.out_dir, run_name)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -896,6 +909,18 @@ if __name__ == '__main__':
                              "--soft_max_a e' specificato, altrimenti ignorato). Valori alti (20-50): "
                              "transizione quasi netta ma ancora derivabile. Valori bassi (2-5): "
                              "transizione molto graduale. Default 10.0.")
+    parser.add_argument('--weight_standardization', action='store_true',
+                        help="Se presente (default: disattivato, comportamento originale invariato), "
+                             "ogni Conv2d 'normale' della rete (dentro i ConvBlock di encoder/decoder, "
+                             "e il layer di output finale -- NON le ConvTranspose2d di upsampling) "
+                             "standardizza i propri pesi (media 0, std 1 per canale di output) ad ogni "
+                             "forward, prima di usarli nella convoluzione. Trasformazione sui PARAMETRI, "
+                             "non sulle attivazioni -- zero costo aggiuntivo in HE (si applica una volta "
+                             "in chiaro, prima di cifrare). Motivazione: la diagnostica (conv_weight_norm) "
+                             "ha mostrato la norma dei pesi crescere nei run poi collassati -- WS vincola "
+                             "strutturalmente la scala di ogni filtro. Compatibile con checkpoint "
+                             "esistenti (stessa forma dei pesi, comportamento numerico diverso). Vedi "
+                             "WSConv2d in models/he_friendly.py.")
     parser.add_argument('--reset_poly_a', action='store_true',
                         help="Se presente, forza 'a'=0.1 su ogni PolyAct DOPO aver caricato --init_from, "
                              "anche in modalita' libera (max_a_poly=None), dove altrimenti il checkpoint "
