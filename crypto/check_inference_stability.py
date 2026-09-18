@@ -57,6 +57,11 @@ def main():
                              "originale. Se il checkpoint usa per_instance (es. tutti i run di "
                              "Fase III di oggi), va impostato di conseguenza -- altrimenti si sta "
                              "valutando un modello diverso da quello allenato.")
+    parser.add_argument('--weight_standardization', action='store_true',
+                    help="DEVE essere presente se il checkpoint e' stato allenato con "
+                         "--weight_standardization (i pesi Conv2d vengono standardizzati "
+                         "ad ogni forward tramite WSConv2d) -- altrimenti si carica un "
+                         "modello architetturalmente diverso da quello allenato.")
     args = parser.parse_args()
 
     device = torch.device('mps') if torch.backends.mps.is_available() else \
@@ -65,7 +70,8 @@ def main():
     print(f'norm_mode: {args.norm_mode}')
 
     model = HEFriendlyUNet(in_channels=1, num_classes=4, act_type='poly',
-                           norm_type='instance', norm_mode=args.norm_mode).to(device)
+                           norm_type='instance', norm_mode=args.norm_mode,
+                           weight_standardization=args.weight_standardization).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
     # strict=False: necessario se il checkpoint contiene buffer di popolazione
     # (running_mean/var/num_batches_tracked) non presenti in un modello
