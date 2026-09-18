@@ -30,3 +30,6 @@ checkpoints/
 *.pth
 results/**/*.pth
 results/
+crypto/test_cases.json
+crypto/test_set_evaluation_log.json
+crypto/ws_sum_collapse_report.json
