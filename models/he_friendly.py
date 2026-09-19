@@ -257,15 +257,30 @@ def get_norm(norm_type: str, num_features: int, norm_mode: str = 'population'):
 # ---------------------------------------------------------------------------
 
 class WSConv2d(nn.Conv2d):
+    """
+    Conv2d con Weight Standardization: prima di ogni forward, i pesi di
+    ciascun canale di output vengono standardizzati (media 0, deviazione
+    standard 1) sulle dimensioni (in_channels, kH, kW), poi riscalati da
+    un gain per-canale strutturalmente vincolato a restare >= gain_floor
+    (vedi sotto) -- una trasformazione sui PARAMETRI, non sulle attivazioni
+    (a differenza di BatchNorm/InstanceNorm).
+
+    gain_floor: valore minimo strutturale per 'gain' (vedi forward).
+    Impedisce al gain di collassare verso zero durante il training --
+    motivato dalla scoperta empirica (crypto/check_ws_sum_norm_collapse.py)
+    che un gain libero puo' scivolare fino a ~2e-5 su singoli canali,
+    producendo un'uscita quasi costante che fa collassare la varianza
+    per-istanza della InstanceNorm successiva (0 -> 1/sqrt(var) esplode).
+
+    IMPORTANTE per la compatibilita' con i checkpoint: un checkpoint
+    allenato PRIMA di questo fix ha una chiave 'gain' (gain libero, senza
+    floor) invece di 'raw_gain' -- caricarlo qui con strict=False scarta
+    silenziosamente quella chiave e lascia raw_gain a zero per ogni
+    canale, falsando qualunque valutazione. Per quei checkpoint "storici"
+    serve ricostruire la vecchia WSConv2d (vedi crypto/ablate_decoder_
+    stages.py, classe LegacyWSConv2d) invece di questa.
+    """
     def __init__(self, *args, gain_floor: float = 0.05, **kwargs):
-        """
-        gain_floor: valore minimo strutturale per 'gain' (vedi forward).
-        Impedisce al gain di collassare verso zero durante il training --
-        motivato dalla scoperta empirica (crypto/check_ws_sum_norm_collapse.py)
-        che un gain libero puo' scivolare fino a ~2e-5 su singoli canali,
-        producendo un'uscita quasi costante che fa collassare la varianza
-        per-istanza della InstanceNorm successiva (0 -> 1/sqrt(var) esplode).
-        """
         super().__init__(*args, **kwargs)
         self.gain_floor = gain_floor
         # raw_gain e' il parametro libero; gain effettivo = gain_floor + softplus(raw_gain)
@@ -277,24 +292,24 @@ class WSConv2d(nn.Conv2d):
         return self.gain_floor + nn.functional.softplus(self.raw_gain)
 
     def forward(self, x):
-        w = self.weight
-        out_ch = w.shape[0]
-        w_flat = w.reshape(out_ch, -1)
+        weight = self.weight
+        out_ch = weight.shape[0]
+        w_flat = weight.reshape(out_ch, -1)
         mean = w_flat.mean(dim=1, keepdim=True)
         std = w_flat.std(dim=1, keepdim=True, unbiased=False)
-        w_std = (w_flat - mean) / (std + 1e-5)
-        w_std = w_std * self.effective_gain().view(-1, 1)
-        w_std = w_std.reshape(w.shape)
-        return nn.functional.conv2d(x, w_std, self.bias, self.stride,
-                                     self.padding, self.dilation, self.groups)
+        w_standardized = (w_flat - mean) / (std + 1e-5)
+        w_standardized = w_standardized * self.effective_gain().view(-1, 1)
+        w_standardized = w_standardized.reshape(weight.shape)
+        return nn.functional.conv2d(
+            x, w_standardized, self.bias, self.stride,
+            self.padding, self.dilation, self.groups
+        )
 
 
 def calibrate_ws_gain(model):
-    """Aggiornata per la riparametrizzazione gain_floor + softplus(raw_gain):
-    calibra raw_gain tramite la softplus INVERSA, cosi' il gain effettivo
-    iniziale coincide comunque con lo std originale dei pesi caricati
-    (stesso comportamento di prima, stesso obiettivo -- evitare lo shock
-    iniziale), ma ora 'gain' non potra' mai scendere sotto gain_floor."""
+    """Calibra raw_gain tramite la softplus INVERSA, cosi' il gain effettivo
+    iniziale coincide con lo std originale dei pesi caricati (evita lo shock
+    iniziale), ma 'gain' non potra' mai scendere sotto gain_floor."""
     with torch.no_grad():
         for m in model.modules():
             if isinstance(m, WSConv2d):
@@ -381,13 +396,14 @@ class HEFriendlyUNet(nn.Module):
         norm_type:    'none' | 'batch' | 'instance'
         norm_mode:    'population' | 'per_instance' (vedi get_norm())
         skip_mode:    'concat' | 'sum' (vedi sotto)
+        filters:      lista di 6 interi, canali per stage encoder (vedi sotto)
     """
 
     def __init__(self, in_channels=1, num_classes=4,
                  act_type='poly', norm_type='none', clamp_values=None,
                  norm_mode='population', max_a_poly=None, act_overrides=None,
                  soft_max_a=None, soft_sharpness=10.0, skip_mode='concat',
-                 weight_standardization=False):
+                 weight_standardization=False, filters=None):
         """
         weight_standardization: se True (default False, invariato), ogni
         Conv2d "normale" della rete (dentro i ConvBlock di encoder/decoder,
@@ -399,6 +415,22 @@ class HEFriendlyUNet(nn.Module):
         modello con WS attivata (e viceversa) senza errori di shape, ma il
         comportamento numerico cambia, quindi le prestazioni vanno
         riverificate.
+
+        filters: lista di 6 interi [enc0, enc1, enc2, enc3, enc4, enc5] --
+        numero di canali per stage encoder (dec4..dec0 usano enc4..enc0 in
+        ordine inverso, essendo un'architettura simmetrica). Default None:
+        usa [32, 64, 128, 256, 512, 512], il dimensionamento originale.
+
+        Motivazione (crypto/ablate_decoder_width.py, richiesta di Aurora sul
+        dimensionamento): l'ablazione per canale ha mostrato ridondanza molto
+        alta negli stage a bassa risoluzione spaziale (enc4, enc5, dec4 --
+        tenuta quasi intatta anche a 1/8 della larghezza), e ridondanza bassa
+        negli stage ad alta risoluzione (enc0, dec0, dec1, dec2 -- crollo gia'
+        a 1/2 o 1/4). Questo parametro permette di testare configurazioni piu'
+        strette in modo mirato, invece di ridurre l'intera rete uniformemente.
+        ATTENZIONE: cambia le shape dei pesi -- richiede training da zero,
+        non caricabile via --init_from/--pretrained da un checkpoint con
+        filters diversi.
 
         clamp_values: dizionario opzionale {nome_layer: soglia}, con chiavi
         del tipo 'enc0.block.2', 'enc0.block.5', ecc. (lo stesso formato
@@ -498,6 +530,7 @@ class HEFriendlyUNet(nn.Module):
             raise ValueError(f"skip_mode deve essere 'concat' o 'sum', ricevuto: {skip_mode}")
         self.skip_mode = skip_mode
         self.weight_standardization = weight_standardization
+        self.filters = filters or [32, 64, 128, 256, 512, 512]
 
         def block_act_type(block_name):
             """Ritorna act_type globale, a meno che act_overrides non lo
@@ -514,7 +547,7 @@ class HEFriendlyUNet(nn.Module):
                 return (clamp_values[k1], clamp_values[k2])
             return None
 
-        filters = [32, 64, 128, 256, 512, 512]
+        filters = self.filters
 
         # Encoder
         self.enc0 = ConvBlock(in_channels, filters[0], stride=1,
@@ -613,12 +646,21 @@ class HEFriendlyUNet(nn.Module):
         e4 = self.enc4(e3)
         e5 = self.enc5(e4)
 
+        # bypass: set di nomi stage ('dec0'..'dec4') il cui calcolo va saltato,
+        # sostituendolo con la sola skip connection (l'output dello stage
+        # encoder corrispondente, prima dell'upsampling). Default vuoto --
+        # nessun effetto sul comportamento esistente, usato solo per
+        # l'ablation study (crypto/ablate_decoder_stages.py, richiesta di
+        # Aurora dopo la scoperta dello squilibrio nei gradienti skip/
+        # upsampling fino a 14:1 in dec0).
+        bypass = getattr(self, 'decoder_bypass', set())
+
         # Decoder with skip connections
-        d4 = self.dec4(self._combine_skip(self.up4(e5), e4))
-        d3 = self.dec3(self._combine_skip(self.up3(d4), e3))
-        d2 = self.dec2(self._combine_skip(self.up2(d3), e2))
-        d1 = self.dec1(self._combine_skip(self.up1(d2), e1))
-        d0 = self.dec0(self._combine_skip(self.up0(d1), e0))
+        d4 = e4 if 'dec4' in bypass else self.dec4(self._combine_skip(self.up4(e5), e4))
+        d3 = e3 if 'dec3' in bypass else self.dec3(self._combine_skip(self.up3(d4), e3))
+        d2 = e2 if 'dec2' in bypass else self.dec2(self._combine_skip(self.up2(d3), e2))
+        d1 = e1 if 'dec1' in bypass else self.dec1(self._combine_skip(self.up1(d2), e1))
+        d0 = e0 if 'dec0' in bypass else self.dec0(self._combine_skip(self.up0(d1), e0))
 
         return self.out_conv(d0)
 
@@ -692,3 +734,16 @@ if __name__ == '__main__':
           f'{w_standardized.mean(dim=1)[:3].tolist()} (atteso: vicino a 0)')
     print(f'WSConv2d: std pesi standardizzati per canale (primi 3) = '
           f'{w_standardized.std(dim=1, unbiased=False)[:3].tolist()} (atteso: vicino a 1)')
+
+    # Sanity check filters: rete piu' stretta ha meno parametri, forward OK
+    m_default = HEFriendlyUNet(act_type='poly', norm_type='instance')
+    m_narrow = HEFriendlyUNet(act_type='poly', norm_type='instance',
+                              filters=[32, 64, 128, 256, 128, 64])
+    p_default = sum(p.numel() for p in m_default.parameters())
+    p_narrow = sum(p.numel() for p in m_narrow.parameters())
+    print(f'\nfilters default -> params={p_default:,}')
+    print(f'filters ristretti [32,64,128,256,128,64] -> params={p_narrow:,} '
+          f'(atteso: meno del default)')
+    x = torch.randn(1, 1, 256, 224)
+    y_narrow = m_narrow(x)
+    print(f'filters ristretti forward OK, output shape={tuple(y_narrow.shape)}')

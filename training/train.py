@@ -505,6 +505,7 @@ def train(args):
         soft_sharpness=args.soft_sharpness,
         skip_mode=args.skip_mode,
         weight_standardization=args.weight_standardization,
+        filters=args.filters,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -1008,5 +1009,10 @@ if __name__ == '__main__':
                              'norma complessiva dei pesi conv. None (default) = diagnostica disattivata, '
                              'nessun effetto su training/performance. Usalo per capire QUALE layer '
                              'inizia a derivare prima di un collasso improvviso del Dice.')
+    parser.add_argument('--filters', type=int, nargs=6, default=None,
+                        help="6 interi [enc0..enc5], canali per stage. Default None "
+                            "(dimensionamento originale [32,64,128,256,512,512]). "
+                            "Cambia le shape dei pesi -- richiede training da zero, "
+                            "non compatibile con --init_from/--pretrained esistenti.")
     args = parser.parse_args()
     train(args)
