@@ -25,7 +25,7 @@ from crypto.fhe_ops_single_ciphertext import (
 )
 
 
-def build_context_and_keys(img_h, img_w, halo, K, n_pixels, depth=30, ring_pow=17):
+def build_context_and_keys(img_h, img_w, halo, K, n_pixels, depth=45, ring_pow=17):
     params = fhe.CCParams()
     params.SetSecurityLevel(fhe.HEStd_128_classic)
     params.SetRingDim(1 << ring_pow)
@@ -83,7 +83,7 @@ def main():
     img_hp, img_wp = img_h + 2*halo, img_w + 2*halo
 
     print("Costruzione contesto e chiavi...")
-    cc, keys = build_context_and_keys(img_h, img_w, halo, K, n_pixels, depth=30)
+    cc, keys = build_context_and_keys(img_h, img_w, halo, K, n_pixels, depth=45)
     print("Contesto pronto.\n")
 
     rng = np.random.default_rng(42)
