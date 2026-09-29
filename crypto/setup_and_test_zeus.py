@@ -14,7 +14,8 @@ Uso: python3 crypto/setup_and_test_zeus.py
 
 import sys
 import numpy as np
-sys.path.insert(0, '.')  # o il path corretto verso PyFIDESlib su Zeus
+sys.path.insert(0, '/home/masi/PyFIDESlib')
+sys.path.insert(0, '/home/masi/acdc-he-segmentation')
 
 import fideslib_py as fhe
 from crypto.fhe_ops_single_ciphertext import (
