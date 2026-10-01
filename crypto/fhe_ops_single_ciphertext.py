@@ -1,49 +1,46 @@
 """
-crypto/fhe_ops_single_ciphertext.py
+crypto/fhe_ops_single_ciphertext.py (v2)
 
-Versione SEMPLIFICATA della pipeline HE (FIDESlib), che elimina del
-tutto il concetto di griglia multi-tile -- indicazione di Aurora:
-usare N=2^17 (131.072), che da' 65.536 slot per ciphertext, sufficienti
-a contenere l'intera immagine (256x224 = 57.344 pixel) in UN SOLO
-ciphertext per canale, invece dei 2 tile usati finora.
+AGGIORNAMENTO IMPORTANTE rispetto alla v1: crop_valid_fhe ed
+embed_valid_into_padded_fhe erano O(n_pixel) -- un ciclo con una
+rotazione+maschera+somma per OGNI pixel. Misurato su Zeus (A40): a
+64x56 (3.584 pixel), un solo crop+embed per canale costava ~920
+secondi -- a piena risoluzione (256x224, 16x piu' pixel) sarebbe
+costato ore per un solo ConvBlock, del tutto impraticabile per
+un'intera rete di 11 blocchi.
 
-Cosa e' cambiato rispetto alla versione a 2 tile:
-- SPARISCE exchange_halo_2tiles_fhe (nessun bordo condiviso tra tile
-  da riempire -- il bordo dell'immagine e' sempre e solo il vero
-  bordo esterno, gia' gestito dallo zero-padding).
-- SPARISCE combined_tile_stats_fhe (le statistiche di InstanceNorm si
-  calcolano su un solo ciphertext, non piu' sommando due tile).
-- RESTANO INVARIATE: poly_act_fhe, isqrt_chebyshev_fhe,
-  fit_monotonic_isqrt_coeffs, conv2d_multichannel_fhe,
-  downsample_stride2_fhe, expand_scatter_fhe,
-  conv_transpose2d_single_channel_fhe, skip_connection_sum_fhe --
-  non dipendevano dal numero di tile, solo dalle dimensioni passate.
-- RESTA NECESSARIO il ritaglio/reinserimento dell'halo (crop_valid_fhe,
-  embed_valid_into_padded_fhe): non e' un problema di tiling, e'
-  dovuto al fatto che la convoluzione "sporca" comunque il bordo per
-  il wraparound delle rotazioni, anche con un solo ciphertext che
-  contiene l'intera immagine con il suo halo.
+LA CORREZIONE: crop ed embed servivano solo ad azzerare il bordo
+(halo) "sporco" dal wraparound della convoluzione, prima che
+contaminasse norm/act. Questo si ottiene con UNA SOLA moltiplicazione
+per una maschera precalcolata (mask_border_fhe) -- costo O(1), non
+O(n_pixel) -- invece di ritagliare e ricompattare i dati pixel per
+pixel. Il ciphertext resta sempre alla dimensione "piena" (con halo);
+solo i valori al bordo vengono azzerati.
 
-*** AVVISO IMPORTANTE, DA VERIFICARE SU ZEUS, NON DA DARE PER SCONTATO ***
-L'immagine e' 256x224 = 57.344 pixel per canale -- NON una potenza di
-2. broadcast_slot0 qui sotto e' stata generalizzata a ceil(log2(n))
-passi per gestire n arbitrario, ma finora e' stata testata solo su
-potenze di 2 esatte (8, 16). Il comportamento su un n reale non-potenza-
-di-2, con un ciphertext che ha PIU' slot totali (65.536) di quanti ne
-usa il dato reale (57.344), va verificato con un test dedicato PRIMA
-di fidarsene nel resto della pipeline -- vedi test_broadcast_nonpow2()
-in fondo al file.
+Le statistiche di InstanceNorm si adattano di conseguenza
+(instance_stats_padded_fhe): si somma su TUTTO l'array (bordo gia'
+zero, contribuisce 0), dividendo pero' per il numero di pixel VALIDI,
+non per il totale -- nessun ritaglio necessario nemmeno li'.
+
+Le funzioni vecchie (crop_valid_fhe, downsample_stride2_fhe,
+embed_valid_into_padded_fhe) restano nel file: downsample_stride2_fhe
+serve ancora per il vero stride 2 (sottocampionamento reale, non un
+semplice mascheramento -- li' l'operazione per pixel e' inevitabile,
+anche se andra' probabilmente ottimizzata allo stesso modo piu' avanti
+se risultasse un collo di bottiglia simile). crop/embed restano come
+riferimento storico, ma conv_block_fhe (la versione corrente) non le
+usa piu'.
 """
 
 import math
 
 
 # ============================================================
-# PolyAct -- invariata rispetto alla versione a tile
+# PolyAct -- invariata
 # ============================================================
 
 def poly_act_fhe(cc, ct_x, a, b, c):
-    """a*x^2 + b*x + c. Nessuna dipendenza da tile/dimensioni."""
+    """a*x^2 + b*x + c."""
     x_squared = cc.EvalMult(ct_x, ct_x)
     ax2 = cc.EvalMult(x_squared, a)
     bx = cc.EvalMult(ct_x, b)
@@ -53,21 +50,14 @@ def poly_act_fhe(cc, ct_x, a, b, c):
 
 
 # ============================================================
-# Broadcast e statistiche -- generalizzate a n arbitrario (non piu'
-# solo potenze di 2 piccole come nei test di ieri)
+# Broadcast -- invariata, generalizzata a n arbitrario (verificato
+# funzionante su n=100 non potenza di 2, su Zeus)
 # ============================================================
 
 def broadcast_slot0(cc, ct, n_elements):
-    """
-    Porta il valore nello slot 0 su tutti gli n_elements slot.
-
-    Generalizzata: usa ceil(log2(n_elements)) passi di raddoppio,
-    invece di richiedere che n_elements sia esattamente una potenza
-    di 2. *** DA VERIFICARE SU ZEUS con n_elements=57344 (il caso
-    reale) prima di fidarsene nel resto della pipeline. ***
-    """
+    """Porta il valore nello slot 0 su tutti gli n_elements slot."""
     n_steps = math.ceil(math.log2(n_elements)) if n_elements > 1 else 0
-    n_slots_covered = 1 << n_steps  # prossima potenza di 2 >= n_elements
+    n_slots_covered = 1 << n_steps
 
     mask = [1.0] + [0.0] * (n_slots_covered - 1)
     pt_mask = cc.MakeCKKSPackedPlaintext(mask)
@@ -81,38 +71,98 @@ def broadcast_slot0(cc, ct, n_elements):
     return ct_masked
 
 
-def instance_stats_fhe(cc, ct_x, n_pixels):
-    """
-    Media e varianza per-istanza su un SOLO ciphertext (l'intera
-    immagine per quel canale, non piu' un tile). Stessa logica di
-    ieri (AccumulateSum + broadcast), ma senza bisogno di sommare
-    contributi da piu' tile.
-    """
-    sum_x = cc.AccumulateSum(ct_x, n_pixels, stride=1)
-    sum_x = broadcast_slot0(cc, sum_x, n_pixels)
-    mean = cc.EvalMult(sum_x, 1.0 / n_pixels)
+# ============================================================
+# NUOVO: mascheramento del bordo, O(1) invece di O(n_pixel)
+# ============================================================
 
-    x_squared = cc.EvalMult(ct_x, ct_x)
-    sum_x2 = cc.AccumulateSum(x_squared, n_pixels, stride=1)
-    sum_x2 = broadcast_slot0(cc, sum_x2, n_pixels)
-    mean_sq = cc.EvalMult(sum_x2, 1.0 / n_pixels)
+def mask_border_fhe(cc, ct, tile_hp, tile_wp, tile_h, tile_w, halo=1):
+    """
+    Azzera il bordo (halo) di un'immagine con padding, con UNA SOLA
+    moltiplicazione per una maschera precalcolata -- sostituisce sia
+    crop_valid_fhe SIA embed_valid_into_padded_fhe (che costavano
+    O(tile_h*tile_w) operazioni, una per pixel).
+
+    Il dato NON viene mai spostato/compattato: resta sempre nella
+    forma "piena" (tile_hp x tile_wp, flatten row-major) -- solo i
+    valori al bordo vengono azzerati. La maschera (un plaintext) va
+    ricalcolata solo se cambiano le dimensioni, non a ogni chiamata
+    in un ciclo -- se questa funzione viene chiamata molte volte con
+    le STESSE dimensioni, conviene precalcolare la maschera una volta
+    fuori e passarla, invece di ricostruirla ogni volta (vedi
+    mask_border_fhe_precomputed sotto per quel caso).
+    """
+    mask = []
+    for r in range(tile_hp):
+        for c in range(tile_wp):
+            valid = (0 <= r < tile_h) and (0 <= c < tile_w)
+            mask.append(1.0 if valid else 0.0)
+    pt_mask = cc.MakeCKKSPackedPlaintext(mask)
+    return cc.EvalMult(ct, pt_mask)
+
+
+def make_border_mask_plaintext(cc, tile_hp, tile_wp, tile_h, tile_w, halo=1):
+    """
+    Precalcola la maschera di bordo come plaintext, da riusare su piu'
+    chiamate senza doverla ricostruire ogni volta (utile quando si
+    processano molti canali/blocchi con le stesse dimensioni, come
+    nell'intera rete -- la maschera per una data risoluzione e' sempre
+    la stessa).
+    """
+    mask = []
+    for r in range(tile_hp):
+        for c in range(tile_wp):
+            valid = (0 <= r < tile_h) and (0 <= c < tile_w)
+            mask.append(1.0 if valid else 0.0)
+    return cc.MakeCKKSPackedPlaintext(mask)
+
+
+def mask_border_fhe_precomputed(cc, ct, pt_mask):
+    """Versione che riusa una maschera gia' precalcolata (vedi
+    make_border_mask_plaintext) -- preferibile quando si processano
+    molti ciphertext con le stesse dimensioni, per non rifare il ciclo
+    Python di costruzione della maschera ogni volta (quel ciclo e' in
+    chiaro, quindi economico, ma non c'e' motivo di ripeterlo)."""
+    return cc.EvalMult(ct, pt_mask)
+
+
+# ============================================================
+# NUOVO: statistiche di InstanceNorm su ciphertext "pieno" (con
+# bordo gia' azzerato) -- nessun ritaglio necessario.
+# ============================================================
+
+def instance_stats_padded_fhe(cc, ct_x_masked, n_valid_pixels, n_total_slots):
+    """
+    Media e varianza per-istanza, calcolate su un ciphertext GIA'
+    mascherato (bordo a zero, vedi mask_border_fhe) di dimensione
+    n_total_slots (l'intera immagine CON halo).
+
+    Il bordo azzerato contribuisce 0 alla somma e alla somma dei
+    quadrati -- sommando su TUTTO l'array e dividendo per
+    n_valid_pixels (non n_total_slots) si ottiene la media/varianza
+    corretta sui soli pixel validi, senza alcun ritaglio.
+    """
+    sum_x = cc.AccumulateSum(ct_x_masked, n_total_slots, stride=1)
+    sum_x = broadcast_slot0(cc, sum_x, n_total_slots)
+    mean = cc.EvalMult(sum_x, 1.0 / n_valid_pixels)
+
+    x_squared = cc.EvalMult(ct_x_masked, ct_x_masked)
+    sum_x2 = cc.AccumulateSum(x_squared, n_total_slots, stride=1)
+    sum_x2 = broadcast_slot0(cc, sum_x2, n_total_slots)
+    mean_of_sq = cc.EvalMult(sum_x2, 1.0 / n_valid_pixels)
 
     mean_squared = cc.EvalMult(mean, mean)
-    variance = cc.EvalSub(mean_sq, mean_squared)
+    variance = cc.EvalSub(mean_of_sq, mean_squared)
 
     return mean, variance
 
 
 # ============================================================
-# Radice inversa -- invariata (non dipendeva mai dai tile)
+# Radice inversa -- invariata
 # ============================================================
 
 def isqrt_chebyshev_fhe(cc, ct_var, cheb_coeffs, cheb_domain, post_iter):
-    """
-    Inizializzazione via EvalChebyshevSeries (che si aspetta input in
-    [-1,1] -- il mapping va fatto esplicitamente) + rifinitura Newton.
-    Identica alla versione di ieri, invariata dal tiling.
-    """
+    """Inizializzazione via EvalChebyshevSeries (dominio [-1,1], mapping
+    esplicito) + rifinitura Newton."""
     x_min, x_max = cheb_domain
     scale = 2.0 / (x_max - x_min)
     offset = -(x_min + x_max) / (x_max - x_min)
@@ -133,13 +183,7 @@ def isqrt_chebyshev_fhe(cc, ct_var, cheb_coeffs, cheb_domain, post_iter):
 
 
 def fit_monotonic_isqrt_coeffs(fhe_module, x_min, x_max, degree, extra_safety=1.2, n_check=500):
-    """
-    Genera coefficienti Chebyshev per 1/sqrt(x), garantiti compatibili
-    con EvalChebyshevSeries (dominio [-1,1]). Identica a ieri -- non
-    riceve piu' il modulo 'fhe' come import globale del notebook, ma
-    come parametro esplicito, dato che qui siamo in un vero modulo .py
-    (import fideslib_py as fhe va fatto nello script chiamante).
-    """
+    """Genera coefficienti Chebyshev per 1/sqrt(x), dominio [-1,1]."""
     def target(t):
         x = x_min + (t + 1.0) / 2.0 * (x_max - x_min)
         return 1.0 / math.sqrt(x)
@@ -164,32 +208,12 @@ def fit_monotonic_isqrt_coeffs(fhe_module, x_min, x_max, degree, extra_safety=1.
     return coeffs, shift
 
 
-def instance_norm_fhe(cc, ct_x, n_pixels, gamma, beta, cheb_coeffs, cheb_domain, post_iter):
-    """InstanceNorm completa su un solo ciphertext (un canale, l'intera
-    immagine)."""
-    mean, variance = instance_stats_fhe(cc, ct_x, n_pixels)
-    inv_std = isqrt_chebyshev_fhe(cc, variance, cheb_coeffs, cheb_domain, post_iter)
-
-    centered = cc.EvalSub(ct_x, mean)
-    normalized = cc.EvalMult(centered, inv_std)
-    scaled = cc.EvalMult(normalized, gamma)
-    result = cc.EvalAdd(scaled, beta)
-
-    return result
-
-
 # ============================================================
-# Convoluzione -- invariata (la "griglia" ora e' semplicemente
-# l'immagine intera con il suo halo, non un pezzo di essa)
+# Convoluzione -- invariata
 # ============================================================
 
 def conv2d_multichannel_fhe(cc, ct_channels_in, weight, bias, tile_hp, tile_wp, K=3):
-    """
-    Convoluzione multi-canale, algoritmo SISO (rotazione + moltiplica-
-    zione scalare + somma). Identica a ieri -- qui tile_hp/tile_wp sono
-    semplicemente H+2*halo, W+2*halo dell'INTERA immagine, non di un
-    pezzo di essa.
-    """
+    """Convoluzione multi-canale, algoritmo SISO."""
     Cout = weight.shape[0]
     Cin = len(ct_channels_in)
     ct_channels_out = []
@@ -211,41 +235,37 @@ def conv2d_multichannel_fhe(cc, ct_channels_in, weight, bias, tile_hp, tile_wp, 
 
 
 # ============================================================
-# Ritaglio / reinserimento dell'halo -- ANCORA NECESSARI: non sono
-# un problema di tiling, ma del wraparound della convoluzione sul
-# bordo del rettangolo (che ora e' il vero bordo immagine, non piu'
-# un confine tra tile).
+# VECCHIE crop/embed -- MANTENUTE come riferimento storico, ma NON
+# PIU' USATE da conv_block_fhe. Restano O(n_pixel), troppo lente per
+# uso ripetuto su immagini grandi -- vedi mask_border_fhe sopra.
 # ============================================================
 
-def crop_valid_fhe(cc, ct, tile_hp, tile_wp, tile_h, tile_w):
-    """Estrae la regione valida [0:H, 0:W] dall'immagine con halo,
-    compattandola in H*W slot (stride=1, nessun sottocampionamento)."""
-    return downsample_stride2_fhe(cc, ct, tile_hp, tile_wp, tile_h, tile_w, stride=1)
-
-
 def downsample_stride2_fhe(cc, ct, tile_hp, tile_wp, tile_h, tile_w, stride=2):
-    """Estrae/sottocampiona [0:tile_h,0:tile_w] da un'immagine con halo
-    tile_hp x tile_wp, compattando l'output nei primi
-    (tile_h//stride)*(tile_w//stride) slot. Invariata da ieri."""
     out_h, out_w = tile_h // stride, tile_w // stride
     out_len = out_h * out_w
+    n_total = tile_hp * tile_wp  # <-- NUOVO: lunghezza vera del ciphertext
     result = None
     for out_idx in range(out_len):
         r_out, c_out = divmod(out_idx, out_w)
         src_idx = (r_out * stride) * tile_wp + (c_out * stride)
         shift = src_idx - out_idx
         shifted = cc.EvalRotate(ct, shift) if shift != 0 else ct
-        mask = [1.0 if i == out_idx else 0.0 for i in range(out_len)]
+        mask = [1.0 if i == out_idx else 0.0 for i in range(n_total)]  # <-- FIX: n_total, non out_len
         pt_mask = cc.MakeCKKSPackedPlaintext(mask)
         term = cc.EvalMult(shifted, pt_mask)
         result = term if result is None else cc.EvalAdd(result, term)
     return result
 
 
+def crop_valid_fhe(cc, ct, tile_hp, tile_wp, tile_h, tile_w):
+    """DEPRECATA per l'uso 'azzera il bordo' -- usa mask_border_fhe.
+    Mantenuta solo come riferimento storico (O(n_pixel), lenta)."""
+    return downsample_stride2_fhe(cc, ct, tile_hp, tile_wp, tile_h, tile_w, stride=1)
+
+
 def embed_valid_into_padded_fhe(cc, ct_compact, tile_h, tile_w, tile_hp, tile_wp, halo=1):
-    """Inverso di crop_valid_fhe: rimette i valori compatti dentro
-    un'immagine H+2h x W+2h, bordo lasciato a zero (il vero bordo
-    esterno -- resta zero, niente scambio con nessuno). Invariata."""
+    """DEPRECATA -- usa mask_border_fhe (che non richiede nemmeno
+    questo passo: il dato resta sempre alla dimensione piena)."""
     out_len = tile_hp * tile_wp
     result = None
     for r in range(tile_h):
@@ -261,8 +281,43 @@ def embed_valid_into_padded_fhe(cc, ct_compact, tile_h, tile_w, tile_hp, tile_wp
     return result
 
 
+def instance_stats_fhe(cc, ct_x, n_pixels):
+    """DEPRECATA per l'uso principale -- usa instance_stats_padded_fhe.
+    Mantenuta per compatibilita' con codice che lavora gia' su
+    ciphertext compatti (senza halo), es. test isolati."""
+    sum_x = cc.AccumulateSum(ct_x, n_pixels, stride=1)
+    sum_x = broadcast_slot0(cc, sum_x, n_pixels)
+    mean = cc.EvalMult(sum_x, 1.0 / n_pixels)
+
+    x_squared = cc.EvalMult(ct_x, ct_x)
+    sum_x2 = cc.AccumulateSum(x_squared, n_pixels, stride=1)
+    sum_x2 = broadcast_slot0(cc, sum_x2, n_pixels)
+    mean_sq = cc.EvalMult(sum_x2, 1.0 / n_pixels)
+
+    mean_squared = cc.EvalMult(mean, mean)
+    variance = cc.EvalSub(mean_sq, mean_squared)
+
+    return mean, variance
+
+
+def instance_norm_fhe(cc, ct_x, n_pixels, gamma, beta, cheb_coeffs, cheb_domain, post_iter):
+    """DEPRECATA per l'uso principale (lavora su ciphertext compatto,
+    senza halo) -- il ConvBlock corrente usa la logica equivalente ma
+    inline con instance_stats_padded_fhe, per lavorare direttamente sul
+    ciphertext pieno senza mai ritagliare. Mantenuta per compatibilita'."""
+    mean, variance = instance_stats_fhe(cc, ct_x, n_pixels)
+    inv_std = isqrt_chebyshev_fhe(cc, variance, cheb_coeffs, cheb_domain, post_iter)
+
+    centered = cc.EvalSub(ct_x, mean)
+    normalized = cc.EvalMult(centered, inv_std)
+    scaled = cc.EvalMult(normalized, gamma)
+    result = cc.EvalAdd(scaled, beta)
+
+    return result
+
+
 # ============================================================
-# Stride 2 e ConvTranspose2d -- invariate, gia' generiche
+# Stride 2 e ConvTranspose2d -- invariate
 # ============================================================
 
 def expand_scatter_fhe(cc, ct_in, in_h, in_w, ky, kx, stride=2):
@@ -283,7 +338,7 @@ def expand_scatter_fhe(cc, ct_in, in_h, in_w, ky, kx, stride=2):
 
 
 def conv_transpose2d_single_channel_fhe(cc, ct_in, weight, bias, in_h, in_w, stride=2):
-    """kernel==stride, nessuna sovrapposizione (vedi packing.py)."""
+    """kernel==stride, nessuna sovrapposizione."""
     acc = None
     for ky in range(stride):
         for kx in range(stride):
@@ -296,7 +351,7 @@ def conv_transpose2d_single_channel_fhe(cc, ct_in, weight, bias, in_h, in_w, str
 
 
 # ============================================================
-# Skip connection -- invariata (EvalAdd puro, mai dipeso dai tile)
+# Skip connection -- invariata
 # ============================================================
 
 def skip_connection_sum_fhe(cc, ct_upsampled_channels, ct_skip_channels):
@@ -305,8 +360,9 @@ def skip_connection_sum_fhe(cc, ct_upsampled_channels, ct_skip_channels):
 
 
 # ============================================================
-# ConvBlock completo -- SEMPLIFICATO: niente piu' loop su
-# top/bottom, niente scambio halo tra tile.
+# ConvBlock -- NUOVA VERSIONE, O(1) invece di O(n_pixel) per la
+# gestione del bordo. Il ciphertext resta sempre alla dimensione
+# piena (img_hp x img_wp); mai ritagliato/reimpacchettato.
 # ============================================================
 
 def conv_block_fhe(cc, ct_channels_in,
@@ -314,87 +370,68 @@ def conv_block_fhe(cc, ct_channels_in,
                     conv2_w, conv2_b, gamma2, beta2,
                     cheb_coeffs, cheb_domain, post_iter,
                     a1, b1_, c1, a2, b2_, c2,
-                    img_h, img_w, halo=1, K=3):
+                    img_h, img_w, halo=1, K=3,
+                    pt_mask=None):
     """
     ConvBlock completo (Conv->Norm->Act->Conv->Norm->Act), multi-
-    canale, SU UN SOLO CIPHERTEXT PER CANALE (l'intera immagine).
+    canale, su un solo ciphertext per canale (l'intera immagine, CON
+    halo, sempre alla dimensione piena img_hp x img_wp).
 
-    Molto piu' semplice della versione a 2 tile di ieri: nessun loop
-    su top/bottom, nessuno scambio di halo -- il bordo e' sempre e
-    solo il vero bordo esterno dell'immagine (zero-padding, mai
-    'condiviso' con nessun vicino).
+    pt_mask: maschera di bordo GIA' precalcolata (vedi
+    make_border_mask_plaintext) -- se fornita, evita di ricostruirla
+    ogni volta che questa funzione viene chiamata (utile quando si
+    processano molti blocchi con le stesse dimensioni, come nella rete
+    intera). Se None, la calcola internamente (comodo per test isolati).
 
-    ct_channels_in: lista di Cin ciphertext, GIA' con halo (immagine
-    img_h+2*halo x img_w+2*halo, flatten row-major).
-
-    Returns: lista di Cout ciphertext, COMPATTI (img_h x img_w, SENZA
-    halo) -- da re-impacchettare con embed_valid_into_padded_fhe prima
-    del prossimo ConvBlock, esattamente come nella versione a tile.
+    Returns: lista di Cout ciphertext, dimensione PIENA (img_hp x
+    img_wp) -- il bordo dell'ULTIMO output non e' necessariamente zero
+    (l'ultima attivazione puo' produrre valori non-zero al bordo); se
+    il prossimo passo e' un'altra convoluzione, va comunque mascherato
+    di nuovo PRIMA di quella (la maschera va applicata subito dopo ogni
+    conv, non dopo l'ultima activation di un blocco, a meno che serva
+    esplicitamente un output pulito).
     """
     img_hp, img_wp = img_h + 2*halo, img_w + 2*halo
-    n_pixels = img_h * img_w
+    n_valid = img_h * img_w
+    n_total = img_hp * img_wp
     Cout = conv1_w.shape[0]
+
+    if pt_mask is None:
+        pt_mask = make_border_mask_plaintext(cc, img_hp, img_wp, img_h, img_w, halo)
+
+    def masked(ct):
+        return mask_border_fhe_precomputed(cc, ct, pt_mask)
 
     # --- Primo conv + norm + act ---
     x1 = conv2d_multichannel_fhe(cc, ct_channels_in, conv1_w, conv1_b, img_hp, img_wp, K=K)
 
-    x1_padded = []
+    x1_out = []
     for co in range(Cout):
-        x1_valid = crop_valid_fhe(cc, x1[co], img_hp, img_wp, img_h, img_w)
-        x1_norm = instance_norm_fhe(cc, x1_valid, n_pixels, gamma1[co], beta1[co],
-                                     cheb_coeffs, cheb_domain, post_iter)
-        x1_act = poly_act_fhe(cc, x1_norm, a1, b1_, c1)
-        x1_padded.append(embed_valid_into_padded_fhe(cc, x1_act, img_h, img_w, img_hp, img_wp, halo))
+        x1_masked = masked(x1[co])
+        mean, var = instance_stats_padded_fhe(cc, x1_masked, n_valid, n_total)
+        inv_std = isqrt_chebyshev_fhe(cc, var, cheb_coeffs, cheb_domain, post_iter)
+        centered = cc.EvalSub(x1_masked, mean)
+        normalized = cc.EvalMult(centered, inv_std)
+        scaled = cc.EvalMult(normalized, gamma1[co])
+        norm_out = cc.EvalAdd(scaled, beta1[co])
+        act_out = poly_act_fhe(cc, norm_out, a1, b1_, c1)
+        # Ri-azzera il bordo (norm/act possono averlo reso non-zero)
+        # prima della prossima convoluzione, che altrimenti farebbe
+        # wraparound su valori sporchi.
+        x1_out.append(masked(act_out))
 
     # --- Secondo conv + norm + act ---
-    x2 = conv2d_multichannel_fhe(cc, x1_padded, conv2_w, conv2_b, img_hp, img_wp, K=K)
+    x2 = conv2d_multichannel_fhe(cc, x1_out, conv2_w, conv2_b, img_hp, img_wp, K=K)
 
     out = []
     for co in range(Cout):
-        x2_valid = crop_valid_fhe(cc, x2[co], img_hp, img_wp, img_h, img_w)
-        x2_norm = instance_norm_fhe(cc, x2_valid, n_pixels, gamma2[co], beta2[co],
-                                     cheb_coeffs, cheb_domain, post_iter)
-        out.append(poly_act_fhe(cc, x2_norm, a2, b2_, c2))
+        x2_masked = masked(x2[co])
+        mean, var = instance_stats_padded_fhe(cc, x2_masked, n_valid, n_total)
+        inv_std = isqrt_chebyshev_fhe(cc, var, cheb_coeffs, cheb_domain, post_iter)
+        centered = cc.EvalSub(x2_masked, mean)
+        normalized = cc.EvalMult(centered, inv_std)
+        scaled = cc.EvalMult(normalized, gamma2[co])
+        norm_out = cc.EvalAdd(scaled, beta2[co])
+        out.append(poly_act_fhe(cc, norm_out, a2, b2_, c2))
 
-    return out  # compatti, senza halo -- il chiamante decide se re-impacchettare
-
-
-# ============================================================
-# Test diagnostico da lanciare PER PRIMO su Zeus, prima di fidarsi
-# del resto: verifica broadcast_slot0 su un n realistico, vicino
-# (ma piu' piccolo, per velocita') alla vera dimensione dell'immagine.
-# ============================================================
-
-def test_broadcast_nonpow2(cc, keys, fhe_module):
-    """
-    Verifica broadcast_slot0 su n=100 (non potenza di 2, piccolo
-    abbastanza da essere veloce) prima di fidarsene su n=57344.
-    Chiamare cosi': test_broadcast_nonpow2(cc, keys, fhe)
-    """
-    import random
-    n = 100
-    test_values = [random.uniform(1, 10) for _ in range(n)]
-    # padding a potenza di 2 successiva per la codifica (128 >= 100)
-    n_pow2 = 1 << math.ceil(math.log2(n))
-    padded = test_values + [0.0] * (n_pow2 - n)
-
-    pt = cc.MakeCKKSPackedPlaintext(padded)
-    ct = cc.Encrypt(keys.publicKey, pt)
-
-    sum_ct = cc.AccumulateSum(ct, n, stride=1)
-    broadcast_ct = broadcast_slot0(cc, sum_ct, n)
-
-    pt_result = cc.Decrypt(keys.secretKey, broadcast_ct)
-    pt_result.SetLength(n)
-    result = pt_result.GetRealPackedValue()
-
-    expected_sum = sum(test_values)
-    max_err = max(abs(r - expected_sum) for r in result)
-    print(f"Test broadcast n={n} (non potenza di 2): somma attesa={expected_sum:.4f}")
-    print(f"Valori HE (primi 5): {result[:5]}")
-    print(f"Errore massimo su tutti gli {n} slot: {max_err:.6e}")
-    if max_err > 1e-3:
-        print("\u26a0\ufe0f  ATTENZIONE: errore alto, broadcast_slot0 potrebbe non "
-              "gestire correttamente n non potenza di 2 -- indagare prima di procedere.")
-    else:
-        print("OK: broadcast_slot0 funziona correttamente anche per n non potenza di 2.")
+    return out
