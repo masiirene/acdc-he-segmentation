@@ -1,16 +1,16 @@
 """
-crypto/test_two_blocks_bootstrap_zeus.py
+crypto/test_two_blocks_bootstrap_zeus.py (v2)
 
-Come test_two_blocks_skip_zeus.py, ma con un VERO EvalBootstrap() sui
-ciphertext dopo la skip connection, prima di ConvBlock B -- dato che un
-solo ConvBlock consuma ~35 livelli su un budget stabile di 45, due
-blocchi in sequenza SENZA bootstrap esauriscono la profondita' (visto
-ieri: segfault in ConvBlock B). Il bootstrap resetta il livello,
-permettendo di incatenare blocchi arbitrariamente.
+Aggiornato con la NUOVA API di cache di PyFIDESlib (Alessandro, oggi):
+SetRotationKeyCache, SetBootstrapCache (prima di LoadContext),
+SetPlaintextCache, SetCiphertextCache (dopo LoadContext) -- permette di
+limitare esplicitamente quanto va in VRAM per ciascuna categoria,
+lasciando il resto in RAM di sistema. Questo dovrebbe risolvere il
+crash "out of memory" visto ieri con la vecchia gestione.
 
-Ricetta di parametri (confermata funzionante fino a depth=45, sia su
-2^17 che 2^18): ScalingModSize=59, FirstModSize=60, NumLargeDigits=3
--- presa da tests/diag_bootstrap.py.
+Parametri aggiornati: depth=43 (confermato da Alessandro come vero
+tetto di sicurezza a 128 bit, non 45 come stimato empiricamente),
+level_budget=[4,4] (suggerito da Aurora: meno preciso ma piu' leggero).
 
 Uso: python3 crypto/test_two_blocks_bootstrap_zeus.py
 """
@@ -31,15 +31,17 @@ from crypto.fhe_ops_single_ciphertext import (
     skip_connection_sum_fhe,
 )
 
-DEPTH = 30
+GiB = 1 << 30
+DEPTH = 43
 RING_POW = 17
-LEVEL_BUDGET = [1, 1]
+LEVEL_BUDGET = [4, 4]
+CACHE_GIB = 2  # punto di partenza prudente per OGNI categoria (Alessandro)
 
 
-def build_context_with_bootstrap(img_h, img_w, halo, K, rotation_key_cache_gib=16):
+def build_context_with_bootstrap(img_h, img_w, halo, K, cache_gib=CACHE_GIB):
     img_hp, img_wp = img_h + 2*halo, img_w + 2*halo
     n_total = img_hp * img_wp
-    batch = 1 << (RING_POW - 1)  # slot totali disponibili (N/2)
+    batch = 1 << (RING_POW - 1)
     assert n_total <= batch, f"{n_total} > {batch}, l'immagine non entra"
 
     params = fhe.CCParams()
@@ -60,7 +62,6 @@ def build_context_with_bootstrap(img_h, img_w, halo, K, rotation_key_cache_gib=1
         cc.Enable(f)
     keys = cc.KeyGen()
     cc.EvalMultKeyGen(keys.secretKey)
-    cc.SetRotationKeyCache(rotation_key_cache_gib * 1024**3)
 
     print("  Configurazione bootstrap (EvalBootstrapSetup + KeyGen)...")
     t0 = time.time()
@@ -85,9 +86,19 @@ def build_context_with_bootstrap(img_h, img_w, halo, K, rotation_key_cache_gib=1
     cc.EvalRotateKeyGen(keys.secretKey, unique_rot)
     print(f"    EvalRotateKeyGen: {time.time()-t0:.1f}s")
 
+    # --- NUOVA CACHE: rotazione + bootstrap, PRIMA di LoadContext ---
+    cc.SetRotationKeyCache(cache_gib * GiB)
+    cc.SetBootstrapCache(cache_gib * GiB)
+    print(f"  Cache rotazione/bootstrap impostate a {cache_gib}GiB ciascuna")
+
     t0 = time.time()
     cc.LoadContext(keys.publicKey)
     print(f"  LoadContext: {time.time()-t0:.1f}s")
+
+    # --- NUOVA CACHE: plaintext + ciphertext, DOPO LoadContext ---
+    cc.SetPlaintextCache(cache_gib * GiB)
+    cc.SetCiphertextCache(cache_gib * GiB)
+    print(f"  Cache plaintext/ciphertext impostate a {cache_gib}GiB ciascuna")
 
     return cc, keys, batch
 
@@ -97,7 +108,16 @@ def conv_block_fhe(cc, ct_channels_in, pt_mask,
                     conv2_w, conv2_b, gamma2, beta2,
                     cheb_coeffs, cheb_domain, post_iter,
                     a1, b1_, c1, a2, b2_, c2,
-                    img_h, img_w, halo, K):
+                    img_h, img_w, halo, K,
+                    mid_bootstrap=False):
+    """
+    mid_bootstrap=True inserisce un bootstrap a META' del blocco (dopo
+    la prima meta' conv+norm+act, prima della seconda) -- necessario
+    quando il blocco viene eseguito subito dopo un altro bootstrap, che
+    riporta il livello a un punto fisso (~21 su depth=43, non a zero):
+    un intero ConvBlock (~34-35 livelli) non ci sta nel margine residuo
+    (~22 livelli), ma meta' blocco si'.
+    """
     img_hp, img_wp = img_h + 2*halo, img_w + 2*halo
     n_valid = img_h * img_w
     n_total = img_hp * img_wp
@@ -118,6 +138,16 @@ def conv_block_fhe(cc, ct_channels_in, pt_mask,
         norm_out = cc.EvalAdd(scaled, beta1[co])
         act_out = poly_act_fhe(cc, norm_out, a1, b1_, c1)
         x1_out.append(masked(act_out))
+
+    if mid_bootstrap:
+        print("    [mid-block bootstrap, prima della seconda meta']")
+        for co in range(Cout):
+            t0 = time.time()
+            x1_out[co] = cc.EvalBootstrap(x1_out[co])
+            print(f"      canale {co}: {time.time()-t0:.2f}s, livello dopo: {x1_out[co].GetLevel()}")
+        # Il bordo va rimascherato: il bootstrap non garantisce che
+        # resti esattamente zero li' come prima.
+        x1_out = [masked(ct) for ct in x1_out]
 
     x2 = conv2d_multichannel_fhe(cc, x1_out, conv2_w, conv2_b, img_hp, img_wp, K=K)
     out = []
@@ -157,7 +187,7 @@ def act_ref(x_, a, b, c):
 
 
 def main():
-    print("=== Test: 2 ConvBlock + skip + BOOTSTRAP VERO tra i due ===\n")
+    print("=== Test: 2 ConvBlock + skip + BOOTSTRAP, nuova cache (depth=43, budget=[4,4]) ===\n")
 
     img_h, img_w = 256, 224
     halo = 1
@@ -165,7 +195,7 @@ def main():
     Cin, Cout = 2, 2
     img_hp, img_wp = img_h + 2*halo, img_w + 2*halo
 
-    print("Costruzione contesto (con bootstrap configurato)...")
+    print("Costruzione contesto (con bootstrap e nuova cache)...")
     t0 = time.time()
     cc, keys, batch = build_context_with_bootstrap(img_h, img_w, halo, K)
     print(f"Contesto pronto in {time.time()-t0:.1f}s totali.\n")
@@ -178,9 +208,7 @@ def main():
     skip_data = rng.normal(size=(Cout, img_h, img_w)) * 0.5
 
     def enc(a):
-        # padding a 'batch' slot totali (il resto zero)
-        flat = a.flatten().tolist()
-        return cc.Encrypt(keys.publicKey, cc.MakeCKKSPackedPlaintext(flat))
+        return cc.Encrypt(keys.publicKey, cc.MakeCKKSPackedPlaintext(a.flatten().tolist()))
 
     def dec(ct, n):
         pt = cc.Decrypt(keys.secretKey, ct)
@@ -206,7 +234,7 @@ def main():
     a_, b_, c_ = 0.1, 1.0, 0.5
 
     x_min_test, x_max_test = 0.5, 4.0
-    cheb_coeffs, shift = fit_monotonic_isqrt_coeffs(fhe, x_min_test, x_max_test, degree=2, extra_safety=1.1)
+    cheb_coeffs, shift = fit_monotonic_isqrt_coeffs(fhe, x_min_test, x_max_test, degree=3, extra_safety=1.2)
     cheb_domain = [x_min_test, x_max_test]
     post_iter = 1
     print(f"Coefficienti Chebyshev leggeri pronti (shift={shift:.4f}).\n")
@@ -226,7 +254,6 @@ def main():
     out_A_masked = [mask_border_fhe_precomputed(cc, ct, pt_mask) for ct in out_A]
     ct_skip_masked = [mask_border_fhe_precomputed(cc, ct, pt_mask) for ct in ct_skip]
 
-    # Allinea lo skip (fresco) al livello di out_A (consumato) prima di sommare
     level_deep = out_A_masked[0].GetLevel()
     for co in range(Cout):
         gap = level_deep - ct_skip_masked[co].GetLevel()
@@ -246,14 +273,15 @@ def main():
         bootstrapped.append(ct_boot)
     print()
 
-    print("=== ConvBlock B (stride=1), dopo il bootstrap ===")
+    print("=== ConvBlock B (stride=1), dopo il bootstrap, CON mid-block bootstrap ===")
     t0 = time.time()
     out_B = conv_block_fhe(cc, bootstrapped, pt_mask,
                             conv3_w, conv3_b, gamma, beta,
                             conv4_w, conv4_b, gamma, beta,
                             cheb_coeffs, cheb_domain, post_iter,
                             a_, b_, c_, a_, b_, c_,
-                            img_h, img_w, halo, K)
+                            img_h, img_w, halo, K,
+                            mid_bootstrap=True)
     print(f"ConvBlock B completato in {time.time()-t0:.2f}s.\n")
 
     print("Decifrazione e confronto col riferimento numpy...")
@@ -283,8 +311,7 @@ def main():
         err = np.max(np.abs(he_out[co] - ref_B[co]))
         print(f"{co:8d} {err:14.6e} {he_out[co].var():10.4f} {ref_B[co].var():10.4f}")
 
-    print("\n=== Se l'errore e' piccolo (0.01-0.5, coerente coi test precedenti), ===")
-    print("=== il bootstrap tra blocchi FUNZIONA nella pipeline vera. ===")
+    print("\n=== Se arrivi fin qui senza crash, la nuova cache ha risolto il problema! ===")
 
 
 if __name__ == '__main__':
