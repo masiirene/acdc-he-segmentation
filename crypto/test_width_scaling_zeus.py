@@ -195,7 +195,7 @@ def bootstrap_channels(cc, channels, label, offload_first=None):
 
 
 CHANNELS = 16   # <-- la vera scala da testare (2 era il giocattolo di ieri)
-N_BLOCKS = 3    # <-- ora combiniamo larghezza e profondita' insieme
+N_BLOCKS = 11   # <-- il test finale: larghezza E profondita' vere insieme
 
 
 def main():
