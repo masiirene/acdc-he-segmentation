@@ -213,7 +213,7 @@ def bootstrap_channels(cc, channels, label, offload_first=None):
     return out
 
 
-N_BLOCKS = 5  # <-- alza/abbassa qui per provare con piu' o meno blocchi
+N_BLOCKS = 11  # <-- la rete vera a 6 stage ha esattamente 11 blocchi (2k-1, k=6)
 
 
 def main():
