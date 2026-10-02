@@ -1,0 +1,5 @@
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 45 ~ 15930MB
