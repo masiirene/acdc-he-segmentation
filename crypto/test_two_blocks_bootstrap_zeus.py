@@ -35,7 +35,8 @@ GiB = 1 << 30
 DEPTH = 43
 RING_POW = 17
 LEVEL_BUDGET = [4, 4]
-CACHE_GIB = 2  # punto di partenza prudente per OGNI categoria (Alessandro)
+CACHE_GIB = 2  # abbassato da 4 a 2: con 4 si esauriva la memoria al
+               # secondo bootstrap (mid-block), confermato su Zeus ieri sera
 
 
 def build_context_with_bootstrap(img_h, img_w, halo, K, cache_gib=CACHE_GIB):
@@ -109,7 +110,7 @@ def conv_block_fhe(cc, ct_channels_in, pt_mask,
                     cheb_coeffs, cheb_domain, post_iter,
                     a1, b1_, c1, a2, b2_, c2,
                     img_h, img_w, halo, K,
-                    mid_bootstrap=False):
+                    mid_bootstrap=False, mid_debug_callback=None):
     """
     mid_bootstrap=True inserisce un bootstrap a META' del blocco (dopo
     la prima meta' conv+norm+act, prima della seconda) -- necessario
@@ -140,6 +141,8 @@ def conv_block_fhe(cc, ct_channels_in, pt_mask,
         x1_out.append(masked(act_out))
 
     if mid_bootstrap:
+        if mid_debug_callback is not None:
+            mid_debug_callback(x1_out, "PRIMA del mid-block bootstrap")
         print("    [mid-block bootstrap, prima della seconda meta']")
         for co in range(Cout):
             t0 = time.time()
@@ -148,6 +151,8 @@ def conv_block_fhe(cc, ct_channels_in, pt_mask,
         # Il bordo va rimascherato: il bootstrap non garantisce che
         # resti esattamente zero li' come prima.
         x1_out = [masked(ct) for ct in x1_out]
+        if mid_debug_callback is not None:
+            mid_debug_callback(x1_out, "DOPO il mid-block bootstrap")
 
     x2 = conv2d_multichannel_fhe(cc, x1_out, conv2_w, conv2_b, img_hp, img_wp, K=K)
     out = []
@@ -239,6 +244,32 @@ def main():
     post_iter = 1
     print(f"Coefficienti Chebyshev leggeri pronti (shift={shift:.4f}).\n")
 
+    # --- Riferimento numpy, calcolato ORA (prima della pipeline HE) ---
+    # cosi' possiamo confrontare punto per punto, non solo alla fine.
+    def block_ref(x_p, w1, b1, w2, b2, g, be, a, bb, c, H, W, Cin_, Cout_):
+        y1 = conv_ref(x_p, w1, b1, Cout_, Cin_, H, W, K)
+        y1n = np.stack([norm_ref(y1[co], g[co], be[co]) for co in range(Cout_)])
+        y1a = act_ref(y1n, a, bb, c)
+        y1p = np.pad(y1a, ((0, 0), (0, 2*halo), (0, 2*halo)))
+        y2 = conv_ref(y1p, w2, b2, Cout_, Cout_, H, W, K)
+        y2n = np.stack([norm_ref(y2[co], g[co], be[co]) for co in range(Cout_)])
+        return act_ref(y2n, a, bb, c)
+
+    def dec_patch(ct, label, ref_img, n_total=img_hp*img_wp):
+        pt = cc.Decrypt(keys.secretKey, ct)
+        pt.SetLength(n_total)
+        arr = np.array(pt.GetRealPackedValue()).reshape(img_hp, img_wp)
+        patch_he = arr[5:8, 5:8]
+        patch_ref = ref_img[5:8, 5:8]
+        print(f"    [{label}] patch HE:\n{patch_he}")
+        print(f"    [{label}] patch riferimento:\n{patch_ref}")
+        print(f"    [{label}] errore max sulla patch: {np.max(np.abs(patch_he - patch_ref)):.4e}\n")
+
+    print("Calcolo riferimento numpy per ConvBlock A e skip (per il debug)...")
+    ref_A_dbg = block_ref(x_padded, conv1_w, conv1_b, conv2_w, conv2_b, gamma, beta,
+                           a_, b_, c_, img_h, img_w, Cin, Cout)
+    ref_summed_dbg = ref_A_dbg + skip_data  # ancora SENZA padding, serve paddarlo per confrontare
+
     print("=== ConvBlock A (stride=1) ===")
     t0 = time.time()
     out_A = conv_block_fhe(cc, ct_in, pt_mask,
@@ -263,6 +294,10 @@ def main():
     summed = skip_connection_sum_fhe(cc, out_A_masked, ct_skip_masked)
     print(f"DEBUG livello summed[0] prima del bootstrap: {summed[0].GetLevel()}\n")
 
+    # --- DEBUG: confronto PRIMA del bootstrap (canale 0) ---
+    ref_summed_padded_dbg = np.pad(ref_summed_dbg, ((0, 0), (0, 2*halo), (0, 2*halo)))
+    dec_patch(summed[0], "PRIMA del bootstrap, canale 0", ref_summed_padded_dbg[0])
+
     print("=== BOOTSTRAP sui 2 canali ===")
     bootstrapped = []
     for co in range(Cout):
@@ -273,6 +308,20 @@ def main():
         bootstrapped.append(ct_boot)
     print()
 
+    # --- DEBUG: confronto SUBITO DOPO il bootstrap (canale 0) ---
+    # Il bootstrap NON dovrebbe cambiare il valore, solo il livello/rumore --
+    # quindi il riferimento giusto e' lo STESSO di prima.
+    dec_patch(bootstrapped[0], "DOPO il bootstrap, canale 0", ref_summed_padded_dbg[0])
+
+    # --- Riferimento per il punto intermedio di ConvBlock B (dopo conv3+norm+att) ---
+    y1_ref = conv_ref(ref_summed_padded_dbg, conv3_w, conv3_b, Cout, Cout, img_h, img_w, K)
+    y1n_ref = np.stack([norm_ref(y1_ref[co], gamma[co], beta[co]) for co in range(Cout)])
+    y1a_ref = act_ref(y1n_ref, a_, b_, c_)
+    y1a_ref_padded = np.pad(y1a_ref, ((0, 0), (0, 2*halo), (0, 2*halo)))
+
+    def mid_debug(x1_out_list, label):
+        dec_patch(x1_out_list[0], f"{label}, canale 0", y1a_ref_padded[0])
+
     print("=== ConvBlock B (stride=1), dopo il bootstrap, CON mid-block bootstrap ===")
     t0 = time.time()
     out_B = conv_block_fhe(cc, bootstrapped, pt_mask,
@@ -281,28 +330,18 @@ def main():
                             cheb_coeffs, cheb_domain, post_iter,
                             a_, b_, c_, a_, b_, c_,
                             img_h, img_w, halo, K,
-                            mid_bootstrap=True)
+                            mid_bootstrap=True, mid_debug_callback=mid_debug)
     print(f"ConvBlock B completato in {time.time()-t0:.2f}s.\n")
 
     print("Decifrazione e confronto col riferimento numpy...")
-    he_out = [dec(ct, img_h*img_w).reshape(img_h, img_w) for ct in out_B]
+    # out_B e' ancora nel formato CON alone (img_hp x img_wp), non compatto --
+    # decifriamo alla dimensione piena e ritagliamo l'angolo valido (convenzione
+    # top-left, confermata nei bug precedenti).
+    he_out = [dec(ct, img_hp*img_wp).reshape(img_hp, img_wp)[0:img_h, 0:img_w] for ct in out_B]
 
-    def block_ref(x_p, w1, b1, w2, b2, g, be, a, bb, c, H, W, Cin_, Cout_):
-        y1 = conv_ref(x_p, w1, b1, Cout_, Cin_, H, W, K)
-        y1n = np.stack([norm_ref(y1[co], g[co], be[co]) for co in range(Cout_)])
-        y1a = act_ref(y1n, a, bb, c)
-        y1p = np.pad(y1a, ((0, 0), (0, 2*halo), (0, 2*halo)))
-        y2 = conv_ref(y1p, w2, b2, Cout_, Cout_, H, W, K)
-        y2n = np.stack([norm_ref(y2[co], g[co], be[co]) for co in range(Cout_)])
-        return act_ref(y2n, a, bb, c)
-
-    print("Calcolo riferimento numpy...")
+    print("Calcolo riferimento numpy per ConvBlock B (riusando ref_summed_dbg)...")
     t0 = time.time()
-    ref_A = block_ref(x_padded, conv1_w, conv1_b, conv2_w, conv2_b, gamma, beta,
-                       a_, b_, c_, img_h, img_w, Cin, Cout)
-    ref_summed = ref_A + skip_data
-    ref_summed_padded = np.pad(ref_summed, ((0, 0), (0, 2*halo), (0, 2*halo)))
-    ref_B = block_ref(ref_summed_padded, conv3_w, conv3_b, conv4_w, conv4_b, gamma, beta,
+    ref_B = block_ref(ref_summed_padded_dbg, conv3_w, conv3_b, conv4_w, conv4_b, gamma, beta,
                        a_, b_, c_, img_h, img_w, Cout, Cout)
     print(f"Riferimento calcolato in {time.time()-t0:.1f}s.\n")
 
