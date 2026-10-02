@@ -1,18 +1,24 @@
 """
 crypto/test_three_blocks_bootstrap_zeus.py
 
-Estende test_two_blocks_bootstrap_zeus.py a un TERZO blocco, per
-rispondere alla domanda: la memoria GPU si stabilizza (costo fisso di
-chiavi/precomputazione bootstrap) o continua a salire con ogni blocco
-in piu' (qualcosa si accumula e va liberato esplicitamente)?
+Pipeline a N blocchi generica (N_BLOCKS in cima a main()), con:
+1. print_gpu_mem(label) -- stampa la memoria GPU reale via nvidia-smi
+   ad ogni passaggio chiave, invece di doverla leggere a occhio da nvtop.
+2. Offload()/TrimGPUMemoryPool() espliciti prima di ogni bootstrap
+   (per gruppo E tra un canale e l'altro) e a meta' di ogni blocco --
+   necessari perche' FIDESlib tiene la VRAM nel suo pool interno finche'
+   non le dici esplicitamente di restituirla, anche per ciphertext gia'
+   distrutti lato Python.
+3. bsgsDim=[4,4] esplicito in EvalBootstrapSetup (invece di [0,0], che
+   lascia scegliere alla libreria ottimizzando per velocita'): dimezza
+   le chiavi di rotazione necessarie (79 -> 45), a scapito di qualche
+   secondo in piu' per bootstrap -- è quello che ha sbloccato tutto.
 
-Due aggiunte rispetto alla v2:
-1. print_gpu_mem(label) -- stampa la memoria GPU usata via nvidia-smi,
-   cosi' il dato e' nel log invece che solo visibile a occhio su nvtop.
-2. del esplicito + gc.collect() sui ciphertext dei blocchi gia' finiti,
-   per capire se questo fa la differenza.
+Con queste tre cose insieme, 3 blocchi completi (6 bootstrap totali)
+girano senza crash su una A40 condivisa con altri due processi.
 
 Uso: python3 crypto/test_three_blocks_bootstrap_zeus.py
+     (cambia N_BLOCKS in main() per provare con piu'/meno blocchi)
 """
 
 import sys
@@ -207,8 +213,11 @@ def bootstrap_channels(cc, channels, label, offload_first=None):
     return out
 
 
+N_BLOCKS = 5  # <-- alza/abbassa qui per provare con piu' o meno blocchi
+
+
 def main():
-    print("=== Test: 3 ConvBlock + skip + BOOTSTRAP, CACHE_GIB=1 ===\n")
+    print(f"=== Test: {N_BLOCKS} ConvBlock in sequenza, bsgsDim=[4,4], CACHE_GIB=1 ===\n")
 
     img_h, img_w = 256, 224
     halo = 1
@@ -237,18 +246,6 @@ def main():
         pt.SetLength(n)
         return np.array(pt.GetRealPackedValue())
 
-    ct_in = [enc(x_padded[c]) for c in range(Cin)]
-
-    def rand_weights():
-        return (rng.normal(size=(Cout, Cout, K, K)) * 0.2, rng.normal(size=(Cout,)) * 0.05)
-
-    conv_w = {}
-    for i in range(1, 7):
-        cin = Cin if i == 1 else Cout
-        w = rng.normal(size=(Cout, cin, K, K)) * 0.2
-        b = rng.normal(size=(Cout,)) * 0.05
-        conv_w[i] = (w, b)
-
     gamma = [1.1, 0.9]
     beta = [0.1, -0.1]
     a_, b_, c_ = 0.1, 1.0, 0.5
@@ -258,60 +255,35 @@ def main():
     cheb_domain = [x_min_test, x_max_test]
     post_iter = 1
 
-    # ===== BLOCCO A =====
-    print("=== ConvBlock A ===")
-    t0 = time.time()
-    out_A = conv_block_fhe(cc, ct_in, pt_mask, *conv_w[1], gamma, beta, *conv_w[2], gamma, beta,
-                            cheb_coeffs, cheb_domain, post_iter, a_, b_, c_, a_, b_, c_,
-                            img_h, img_w, halo, K)
-    print(f"Blocco A completato in {time.time()-t0:.2f}s, livello: {out_A[0].GetLevel()}")
-    print_gpu_mem("dopo Blocco A")
+    current = [enc(x_padded[c]) for c in range(Cin)]
 
-    out_A_masked = [mask_border_fhe_precomputed(cc, ct, pt_mask) for ct in out_A]
-    # ct_in e out_A non servono piu' -- scaricali per davvero (del+gc.collect()
-    # da solo NON basta, FIDESlib tiene la VRAM nel suo pool finche' non lo
-    # dici esplicitamente con Offload()+TrimGPUMemoryPool()).
-    boot_A = bootstrap_channels(cc, out_A_masked, "dopo Blocco A",
-                                 offload_first=ct_in + out_A)
-    print_gpu_mem("dopo bootstrap A")
-    for ct in out_A_masked:
-        ct.Offload()
-    cc.TrimGPUMemoryPool()
+    for b_idx in range(1, N_BLOCKS + 1):
+        print(f"\n=== ConvBlock {b_idx}/{N_BLOCKS} ===")
+        cin_this = Cin if b_idx == 1 else Cout
+        w1 = rng.normal(size=(Cout, cin_this, K, K)) * 0.2
+        b1 = rng.normal(size=(Cout,)) * 0.05
+        w2 = rng.normal(size=(Cout, Cout, K, K)) * 0.2
+        b2 = rng.normal(size=(Cout,)) * 0.05
 
-    # ===== BLOCCO B =====
-    print("\n=== ConvBlock B ===")
-    t0 = time.time()
-    out_B = conv_block_fhe(cc, boot_A, pt_mask, *conv_w[3], gamma, beta, *conv_w[4], gamma, beta,
-                            cheb_coeffs, cheb_domain, post_iter, a_, b_, c_, a_, b_, c_,
-                            img_h, img_w, halo, K, mid_bootstrap=True)
-    print(f"Blocco B completato in {time.time()-t0:.2f}s, livello: {out_B[0].GetLevel()}")
-    print_gpu_mem("dopo Blocco B")
+        t0 = time.time()
+        out_blk = conv_block_fhe(cc, current, pt_mask, w1, b1, gamma, beta, w2, b2, gamma, beta,
+                                  cheb_coeffs, cheb_domain, post_iter, a_, b_, c_, a_, b_, c_,
+                                  img_h, img_w, halo, K, mid_bootstrap=(b_idx > 1))
+        print(f"Blocco {b_idx} completato in {time.time()-t0:.2f}s, livello: {out_blk[0].GetLevel()}")
+        print_gpu_mem(f"dopo Blocco {b_idx}")
 
-    out_B_masked = [mask_border_fhe_precomputed(cc, ct, pt_mask) for ct in out_B]
-    # boot_A e out_B (grezzo, pre-maschera) non servono piu'.
-    boot_B = bootstrap_channels(cc, out_B_masked, "dopo Blocco B",
-                                 offload_first=boot_A + out_B)
-    print_gpu_mem("dopo bootstrap B")
-    for ct in out_B_masked:
-        ct.Offload()
-    cc.TrimGPUMemoryPool()
+        out_masked = [mask_border_fhe_precomputed(cc, ct, pt_mask) for ct in out_blk]
+        # il ciphertext in ingresso a questo blocco non serve piu'
+        current = bootstrap_channels(cc, out_masked, f"dopo Blocco {b_idx}",
+                                      offload_first=current + out_blk)
+        print_gpu_mem(f"dopo bootstrap {b_idx}")
+        for ct in out_masked:
+            ct.Offload()
+        cc.TrimGPUMemoryPool()
 
-    # ===== BLOCCO C (il nuovo, il terzo) =====
-    print("\n=== ConvBlock C (NUOVO -- terzo blocco) ===")
-    t0 = time.time()
-    out_C = conv_block_fhe(cc, boot_B, pt_mask, *conv_w[5], gamma, beta, *conv_w[6], gamma, beta,
-                            cheb_coeffs, cheb_domain, post_iter, a_, b_, c_, a_, b_, c_,
-                            img_h, img_w, halo, K, mid_bootstrap=True)
-    print(f"Blocco C completato in {time.time()-t0:.2f}s, livello: {out_C[0].GetLevel()}")
-    print_gpu_mem("dopo Blocco C (IL DATO CHE CI INTERESSA)")
-
-    print("\nDecifrazione finale (solo per controllo di sanita', nessun riferimento qui)...")
-    he_out = dec(out_C[0], img_hp*img_wp).reshape(img_hp, img_wp)[0:img_h, 0:img_w]
-    print(f"Media/var output canale 0: {he_out.mean():.4f} / {he_out.var():.4f}")
-
-    print("\n=== Se sei arrivata qui, 3 blocchi funzionano. Guarda i GPU MEM sopra: ===")
-    print("=== stabile dopo Blocco A -> costo fisso, si puo' scalare oltre.      ===")
-    print("=== continua a salire ad ogni blocco -> serve liberare qualcos'altro. ===")
+    he_out = dec(current[0], img_hp*img_wp).reshape(img_hp, img_wp)[0:img_h, 0:img_w]
+    print(f"\nMedia/var output finale canale 0: {he_out.mean():.4f} / {he_out.var():.4f}")
+    print(f"\n=== Se sei arrivata qui, {N_BLOCKS} blocchi funzionano. ===")
 
 
 if __name__ == '__main__':
