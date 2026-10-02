@@ -246,9 +246,18 @@ def main():
     for b_idx in range(1, N_BLOCKS + 1):
         print(f"\n=== ConvBlock {b_idx}/{N_BLOCKS} ({CHANNELS} canali) ===")
         cin_this = Cin if b_idx == 1 else Cout
-        w1 = rng.normal(size=(Cout, cin_this, K, K)) * 0.2
+        # Scala dei pesi proporzionata al fan-in (come una vera inizializzazione
+        # tipo Kaiming) -- con 2 canali *0.2 andava bene, ma sommando 16
+        # contributi invece di 2 la varianza in uscita cresce e i valori
+        # escono dal dominio [0.5, 4.0] calibrato per il Chebyshev
+        # dell'inverso della radice quadrata. Senza questo fix, il problema
+        # non e' crittografico -- e' solo che i pesi casuali del test non
+        # erano scalati per la larghezza.
+        std1 = 0.2 / math.sqrt(cin_this * K * K)
+        std2 = 0.2 / math.sqrt(Cout * K * K)
+        w1 = rng.normal(size=(Cout, cin_this, K, K)) * std1
         b1 = rng.normal(size=(Cout,)) * 0.05
-        w2 = rng.normal(size=(Cout, Cout, K, K)) * 0.2
+        w2 = rng.normal(size=(Cout, Cout, K, K)) * std2
         b2 = rng.normal(size=(Cout,)) * 0.05
 
         t0 = time.time()
