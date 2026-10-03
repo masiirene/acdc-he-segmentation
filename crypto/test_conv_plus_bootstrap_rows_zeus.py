@@ -226,6 +226,35 @@ def main():
     if rows_out[0] is not None:
         print(f"Livello riga di output 0: {rows_out[0].GetLevel()}")
 
+    # --- DEBUG: controllo PRIMA del bootstrap, per capire se l'errore
+    # nasce gia' qui o solo dopo (aggiunto dopo l'errore grande visto
+    # a 128 canali, mai controllato prima del bootstrap finora) ---
+    print("\n=== DEBUG: verifica PRIMA del bootstrap (solo 2 righe, per velocita') ===")
+
+    def conv2d_direct_dbg(x, W, b, K=3):
+        Cin_, Hp_, Wp_ = x.shape
+        Cout_ = W.shape[0]
+        out = np.zeros((Cout_, Hp_, Wp_))
+        for co in range(Cout_):
+            for ci in range(Cin_):
+                for ky in range(K):
+                    for kx in range(K):
+                        shifted = np.roll(np.roll(x[ci], -ky, axis=0), -kx, axis=1)
+                        out[co] += W[co, ci, ky, kx] * shifted
+        return out  # SENZA bias, coerente con la pipeline HE a questo punto
+
+    ref_dbg = conv2d_direct_dbg(x_padded, weight, bias, K=K)
+    for r in [0, 1]:
+        if rows_out[r] is None:
+            continue
+        pt = cc.Decrypt(keys.secretKey, rows_out[r])
+        pt.SetLength(batch_size)
+        he_row_pre = np.array(pt.GetRealPackedValue())[:WP * n].reshape(WP, n)[:IMG_W, :n]
+        ref_row_pre = ref_dbg[:, r, :IMG_W].T
+        err_pre = np.max(np.abs(he_row_pre - ref_row_pre))
+        print(f"  [PRIMA del bootstrap] Riga {r}: errore max = {err_pre:.6e}")
+    print("=== Fine debug pre-bootstrap ===\n")
+
     print("\nBootstrap su ogni riga di output valida...")
     t0 = time.time()
     rows_boot = []
