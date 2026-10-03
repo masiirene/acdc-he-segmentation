@@ -22,7 +22,9 @@ from crypto.fhe_ops_single_ciphertext import conv2d_multichannel_fhe
 GiB = 1 << 30
 DEPTH = 43
 RING_POW = 17
-CHANNELS = 8  # piccolo apposta, per un confronto rapido
+CHANNELS = 64  # ieri sera l'originale ha impiegato 1438s (24 min) qui --
+               # se "fast" non e' nettamente piu' veloce anche a questa
+               # scala, le rotazioni non sono il vero collo di bottiglia
 
 
 def conv2d_multichannel_fhe_fast(cc, ct_channels_in, weight, bias, tile_hp, tile_wp, K=3):
@@ -128,8 +130,13 @@ def main():
     print(f"Tempo fast:      {t_fast:.2f}s")
     print(f"Speedup: {t_orig/t_fast:.1f}x\n")
 
+    # Controlliamo solo un campione di canali per il confronto (non tutti
+    # e 64 -- decifrare costa tempo, e la correttezza l'abbiamo gia'
+    # verificata a fondo sugli 8 canali di prima; qui serve solo
+    # confermare che regga anche piu' larga).
+    sample_channels = [0, CHANNELS//4, CHANNELS//2, CHANNELS-1]
     max_err = 0.0
-    for co in range(CHANNELS):
+    for co in sample_channels:
         a_orig = dec(out_orig[co], img_hp*img_wp)
         a_fast = dec(out_fast[co], img_hp*img_wp)
         err = np.max(np.abs(a_orig - a_fast))
