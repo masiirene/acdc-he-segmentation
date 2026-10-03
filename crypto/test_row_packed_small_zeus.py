@@ -27,6 +27,7 @@ Uso: python3 crypto/test_row_packed_small_zeus.py
 """
 
 import sys
+import math
 import time
 import numpy as np
 
@@ -86,15 +87,16 @@ def make_masks(cc, total_len, block_size, d):
     return cc.MakeCKKSPackedPlaintext(mask_main), cc.MakeCKKSPackedPlaintext(mask_wrap)
 
 
-def diagonal_mix_channels_fhe(cc, ct_row, W_k, Cin, Cout, Wp, n):
+def diagonal_mix_channels_fhe(cc, ct_row, W_k, Cin, Cout, Wp, n, total_len):
     W_padded = np.zeros((n, n))
     W_padded[:Cout, :Cin] = W_k
-    total_len = Wp * n
 
     acc = None
     for d in range(n):
         diag = np.array([W_padded[i, (i + d) % n] for i in range(n)])
-        diag_tiled = cc.MakeCKKSPackedPlaintext(np.tile(diag, Wp).tolist())
+        diag_full = np.zeros(total_len)
+        diag_full[:Wp * n] = np.tile(diag, Wp)
+        diag_tiled = cc.MakeCKKSPackedPlaintext(diag_full.tolist())
 
         if d == 0:
             row_rot = ct_row
@@ -108,7 +110,7 @@ def diagonal_mix_channels_fhe(cc, ct_row, W_k, Cin, Cout, Wp, n):
     return acc
 
 
-def conv2d_row_packed_fhe(cc, rows_in_ct, weight, bias, Cin, Cout, Wp, n, halo=1, K=3):
+def conv2d_row_packed_fhe(cc, rows_in_ct, weight, bias, Cin, Cout, Wp, n, total_len, halo=1, K=3):
     Hp = len(rows_in_ct)
     rows_out = [None] * Hp
 
@@ -119,22 +121,23 @@ def conv2d_row_packed_fhe(cc, rows_in_ct, weight, bias, Cin, Cout, Wp, n, halo=1
                 continue
             for kx in range(K):
                 # shift orizzontale: ruota la riga di kx PIXEL = kx*n SLOT
-                # (usando la stessa correzione a blocchi, ma con
-                # block_size=n e offset kx*n -- shift di un numero
-                # INTERO di blocchi, quindi NON attraversa un confine
-                # di blocco a meta' -- una singola rotazione globale
-                # basta qui, senza bisogno della correzione).
+                # (shift di un numero INTERO di blocchi -- non attraversa
+                # un confine di blocco a meta', una singola rotazione
+                # globale basta qui, senza bisogno della correzione).
                 shift_slots = kx * n
-                row_shifted = ct_row = rows_in_ct[r_in] if shift_slots == 0 else cc.EvalRotate(rows_in_ct[r_in], shift_slots)
+                row_shifted = rows_in_ct[r_in] if shift_slots == 0 else cc.EvalRotate(rows_in_ct[r_in], shift_slots)
 
                 W_k = weight[:, :, ky, kx]
-                contrib = diagonal_mix_channels_fhe(cc, row_shifted, W_k, Cin, Cout, Wp, n)
+                contrib = diagonal_mix_channels_fhe(cc, row_shifted, W_k, Cin, Cout, Wp, n, total_len)
                 rows_out[r_out] = contrib if rows_out[r_out] is None else cc.EvalAdd(rows_out[r_out], contrib)
 
-    # Aggiungi il bias (un plaintext ripetuto per ogni pixel della riga)
-    bias_padded = np.zeros(n)
-    bias_padded[:Cout] = bias
-    bias_tiled = cc.MakeCKKSPackedPlaintext(np.tile(bias_padded, Wp).tolist())
+    # Aggiungi il bias (un plaintext ripetuto per ogni pixel della riga,
+    # zero oltre ai dati veri)
+    bias_block = np.zeros(n)
+    bias_block[:Cout] = bias
+    bias_full = np.zeros(total_len)
+    bias_full[:Wp * n] = np.tile(bias_block, Wp)
+    bias_tiled = cc.MakeCKKSPackedPlaintext(bias_full.tolist())
     for r in range(Hp):
         if rows_out[r] is not None:
             rows_out[r] = cc.EvalAdd(rows_out[r], bias_tiled)
@@ -151,10 +154,17 @@ def main():
     K = 3
     Hp, Wp = H + 2*halo, W_img + 2*halo
     n = max(Cin, Cout)
-    total_len = Wp * n
+    real_len = Wp * n
+    # Il batch CKKS deve essere una potenza di due -- arrotondiamo per
+    # eccesso, riempiendo il resto con zeri. La correzione a blocchi
+    # (due rotazioni + maschere) resta valida: la derivazione matematica
+    # non dipende da DOVE si chiude il giro, solo dal fatto che sia
+    # abbastanza piu' grande dei dati veri (vedi commento esteso sotto).
+    total_len = 1 << math.ceil(math.log2(real_len))
 
     print(f"Cin={Cin}, Cout={Cout}, immagine {H}x{W_img} (+halo) -> Hp={Hp}, Wp={Wp}")
-    print(f"n=max(Cin,Cout)={n}, lunghezza per riga (batch CKKS) = Wp*n = {total_len}\n")
+    print(f"n=max(Cin,Cout)={n}, lunghezza dati reale = Wp*n = {real_len}")
+    print(f"Batch CKKS (potenza di 2, con padding a zero) = {total_len}\n")
 
     print("Costruzione contesto piccolo...")
     t0 = time.time()
@@ -184,7 +194,10 @@ def main():
         row = x_padded[:, r, :].T  # (Wp, Cin)
         row_padded = np.zeros((Wp, n))
         row_padded[:, :Cin] = row
-        return row_padded.flatten()
+        flat = row_padded.flatten()
+        full = np.zeros(total_len)
+        full[:len(flat)] = flat
+        return full
 
     print("Cifratura delle righe...")
     rows_in_ct = []
@@ -195,7 +208,7 @@ def main():
 
     print("Convoluzione HE (schema a righe + diagonali)...")
     t0 = time.time()
-    rows_out_ct = conv2d_row_packed_fhe(cc, rows_in_ct, weight, bias, Cin, Cout, Wp, n, halo=halo, K=K)
+    rows_out_ct = conv2d_row_packed_fhe(cc, rows_in_ct, weight, bias, Cin, Cout, Wp, n, total_len, halo=halo, K=K)
     print(f"Completata in {time.time()-t0:.2f}s.\n")
 
     def decrypt_row(ct, length):
@@ -226,7 +239,8 @@ def main():
         if rows_out_ct[r] is None:
             print(f"  Riga {r}: NESSUN CONTRIBUTO CALCOLATO (bug)")
             continue
-        he_row = decrypt_row(rows_out_ct[r], total_len).reshape(Wp, n)[:W_img, :Cout]
+        he_row_full = decrypt_row(rows_out_ct[r], total_len)
+        he_row = he_row_full[:Wp * n].reshape(Wp, n)[:W_img, :Cout]
         ref_row = ref[:, r, :W_img].T
         err = np.max(np.abs(he_row - ref_row))
         max_err = max(max_err, err)
