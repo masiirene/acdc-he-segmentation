@@ -40,7 +40,9 @@ CHANNELS = 32
 IMG_W = 224
 HALO = 1
 WP = IMG_W + 2 * HALO  # 226
-H_SMALL = 8  # altezza immagine RIDOTTA per questo test (non 256)
+H_SMALL = 4  # ridotta ulteriormente (da 8 a 4) per prudenza, dopo il
+             # crash SSH -- rialziamo una volta confermato che la
+             # correzione della cache dei plaintext risolve il problema
 K = 3
 
 
@@ -114,14 +116,24 @@ def make_mask(total_len, block_size, d, want_main):
         return (rel_pos >= (block_size - d)).astype(float)
 
 
-def diagonal_mix_channels_fhe(cc, ct_row, W_k, n, wp, total_len, mask_cache):
+def diagonal_mix_channels_fhe(cc, ct_row, W_k, n, wp, total_len, mask_cache, diag_cache, kernel_pos_key):
+    """
+    diag_cache: memorizza i plaintext delle diagonali per (posizione
+    kernel, d) -- NON dipendono dalla riga, quindi vanno calcolati UNA
+    SOLA VOLTA e riusati per tutte le Hp righe, non ricreati ogni volta
+    (bug trovato dopo un crash SSH: 2.880 plaintext creati invece di
+    288 -- probabilmente la causa del sovraccarico di RAM di sistema).
+    """
     W_padded = W_k  # gia' quadrata (Cin==Cout==n in questo test)
     acc = None
     for d in range(n):
-        diag = np.array([W_padded[i, (i + d) % n] for i in range(n)])
-        diag_full = np.zeros(total_len)
-        diag_full[:wp * n] = np.tile(diag, wp)
-        diag_pt = cc.MakeCKKSPackedPlaintext(diag_full.tolist())
+        cache_key = (kernel_pos_key, d)
+        if cache_key not in diag_cache:
+            diag = np.array([W_padded[i, (i + d) % n] for i in range(n)])
+            diag_full = np.zeros(total_len)
+            diag_full[:wp * n] = np.tile(diag, wp)
+            diag_cache[cache_key] = cc.MakeCKKSPackedPlaintext(diag_full.tolist())
+        diag_pt = diag_cache[cache_key]
 
         if d == 0:
             row_rot = ct_row
@@ -180,6 +192,7 @@ def main():
 
     print("\nConvoluzione (una sola, senza norm/att -- solo per verificare conv+bootstrap uniti)...")
     mask_cache = {}
+    diag_cache = {}  # (ky,kx,d) -> plaintext, calcolato UNA VOLTA, riusato per tutte le righe
     t0 = time.time()
     rows_out = [None] * Hp
     for r_out in range(Hp):
@@ -191,7 +204,8 @@ def main():
                 shift = kx * n
                 row_shifted = rows_in[r_in] if shift == 0 else cc.EvalRotate(rows_in[r_in], shift)
                 W_k = weight[:, :, ky, kx]
-                contrib = diagonal_mix_channels_fhe(cc, row_shifted, W_k, n, WP, batch_size, mask_cache)
+                contrib = diagonal_mix_channels_fhe(cc, row_shifted, W_k, n, WP, batch_size,
+                                                     mask_cache, diag_cache, kernel_pos_key=(ky, kx))
                 rows_out[r_out] = contrib if rows_out[r_out] is None else cc.EvalAdd(rows_out[r_out], contrib)
     print(f"Convoluzione completata in {time.time()-t0:.2f}s.")
     print_gpu_mem("dopo la convoluzione")
