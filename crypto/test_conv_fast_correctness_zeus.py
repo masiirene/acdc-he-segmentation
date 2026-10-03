@@ -78,12 +78,12 @@ def build_context(img_h, img_w, halo, K):
     cc.SetRotationKeyCache(1 * GiB)
     cc.LoadContext(keys.publicKey)
     cc.SetPlaintextCache(1 * GiB)
-    # Alzata da 1 a 8 GiB: la versione "fast" tiene Cin*9 ciphertext
-    # ruotati vivi contemporaneamente (576 per 64 canali) -- se la
-    # cache e' troppo piccola, FIDESlib li scarica/ricarica di continuo
-    # dalla RAM, probabilmente il vero motivo per cui "fast" e' risultata
-    # piu' lenta nonostante faccia molte meno rotazioni.
-    cc.SetCiphertextCache(8 * GiB)
+    cc.SetCiphertextCache(1 * GiB)  # rimessa a 1GiB -- 8GiB ha causato
+                                     # out-of-memory di sistema, non ha
+                                     # aiutato. Il problema non e' la
+                                     # cache: la versione "fast" tiene
+                                     # davvero troppi ciphertext vivi
+                                     # insieme, qualunque sia la cache.
     return cc, keys, batch
 
 
