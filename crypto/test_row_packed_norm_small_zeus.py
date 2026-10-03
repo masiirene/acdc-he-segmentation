@@ -147,6 +147,14 @@ def main():
     print(f"Errore media: {np.max(np.abs(mean_he - mean_ref)):.6e}")
     print(f"Errore varianza: {np.max(np.abs(var_he - var_ref)):.6e}\n")
 
+    print("=== DEBUG: mean_ct e' uguale in TUTTI i blocchi della riga, non solo il primo? ===")
+    pt_full = cc.Decrypt(keys.secretKey, mean_ct)
+    pt_full.SetLength(batch_size)
+    mean_full_he = np.array(pt_full.GetRealPackedValue())[:Wp * n].reshape(Wp, n)
+    print("Media HE, blocco per blocco (ogni riga = un pixel, dovrebbero essere TUTTE uguali):")
+    print(mean_full_he)
+    print(f"Atteso in ogni riga: {mean_ref}\n")
+
     print("Applicazione Chebyshev (radice inversa) + norm + PolyAct, su ogni riga valida...")
     x_min_t, x_max_t = max(0.01, var_ref.min() * 0.5), var_ref.max() * 2.0
     cheb_coeffs, shift = fit_monotonic_isqrt_coeffs(fhe, x_min_t, x_max_t, degree=3, extra_safety=1.2)
