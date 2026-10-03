@@ -135,8 +135,10 @@ def diagonal_mix_channels_fhe(cc, ct_row, W_k, n, wp, total_len, mask_cache, dia
     W_padded = W_k  # gia' quadrata (Cin==Cout==n in questo test)
     acc = None
     for d in range(n):
-        if d > 0 and d % 8 == 0:
-            cc.TrimGPUMemoryPool()
+        # Trim interno RIMOSSO per questo esperimento di velocita' --
+        # proviamo ad affidarci SOLO al trim dopo ogni posizione di
+        # kernel (9 volte per riga, molto meno frequente) per vedere
+        # se basta a tenere la memoria piatta, recuperando velocita'.
         cache_key = (kernel_pos_key, d)
         if cache_key not in diag_cache:
             diag = np.array([W_padded[i, (i + d) % n] for i in range(n)])
