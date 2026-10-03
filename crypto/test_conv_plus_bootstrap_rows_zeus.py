@@ -123,10 +123,19 @@ def diagonal_mix_channels_fhe(cc, ct_row, W_k, n, wp, total_len, mask_cache, dia
     SOLA VOLTA e riusati per tutte le Hp righe, non ricreati ogni volta
     (bug trovato dopo un crash SSH: 2.880 plaintext creati invece di
     288 -- probabilmente la causa del sovraccarico di RAM di sistema).
+
+    SECONDO fix, dopo un secondo crash SSH: anche i ciphertext
+    TEMPORANEI creati qui dentro (rotated_main, rotated_wrap, term_*)
+    restano nel pool di FIDESlib finche' non si chiama
+    TrimGPUMemoryPool() esplicitamente -- con ~12.000 operazioni totali
+    nell'intera convoluzione e NESSUN trim nel mezzo, l'accumulo cresce
+    senza controllo. Puliamo ogni poche diagonali, non solo a fine riga.
     """
     W_padded = W_k  # gia' quadrata (Cin==Cout==n in questo test)
     acc = None
     for d in range(n):
+        if d > 0 and d % 8 == 0:
+            cc.TrimGPUMemoryPool()
         cache_key = (kernel_pos_key, d)
         if cache_key not in diag_cache:
             diag = np.array([W_padded[i, (i + d) % n] for i in range(n)])
@@ -207,6 +216,8 @@ def main():
                 contrib = diagonal_mix_channels_fhe(cc, row_shifted, W_k, n, WP, batch_size,
                                                      mask_cache, diag_cache, kernel_pos_key=(ky, kx))
                 rows_out[r_out] = contrib if rows_out[r_out] is None else cc.EvalAdd(rows_out[r_out], contrib)
+                cc.TrimGPUMemoryPool()  # pulizia dopo OGNI posizione di kernel
+        print_gpu_mem(f"dopo riga di output {r_out}")
     print(f"Convoluzione completata in {time.time()-t0:.2f}s.")
     print_gpu_mem("dopo la convoluzione")
     if rows_out[0] is not None:
