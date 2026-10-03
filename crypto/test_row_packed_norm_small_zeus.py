@@ -50,12 +50,45 @@ def build_small_context(batch_size):
     return cc, keys
 
 
-def sum_within_row_strided_fhe(cc, ct_row, n, W):
-    """Somma a passi DENTRO una riga, stride=n -- nessuna correzione a
-    maschere necessaria (a differenza della convoluzione): lo
-    spostamento e' sempre un multiplo di n, non attraversa mai un
-    blocco a meta'. Stesso pattern 'acc=None' usato ovunque oggi, per
-    evitare di dover creare un ciphertext-zero esplicito."""
+def sum_within_row_strided_fhe(cc, ct_row, n, W, real_len, mask_cache):
+    """
+    Somma a passi DENTRO una riga, stride=n -- CORRETTA rispetto alla
+    prima versione (che ignorava il padding a potenza di 2 del batch
+    CKKS). Riusa la STESSA tecnica a due rotazioni + maschere gia'
+    verificata per la convoluzione, ma con una dimensione di blocco
+    DIVERSA: non n (un pixel), bensi' l'INTERA riga vera (real_len =
+    Wp*n) -- il batch CKKS e' arrotondato a potenza di 2 (es. 64), ma
+    i dati veri occupano solo real_len (es. 36) slot, e una singola
+    EvalRotate gira sul batch intero, non sulla lunghezza vera.
+
+    Bug trovato oggi, SOLO in HE vero: il test numpy non l'aveva mai
+    scoperto perche' li' l'array aveva ESATTAMENTE lunghezza real_len,
+    senza il padding a potenza di 2 che CKKS impone.
+    """
+    def rotate_correct(ct, shift):
+        if shift == 0:
+            return ct
+        key = shift
+        if key not in mask_cache:
+            full_len = real_len
+            # Maschera: posizione i e' "main" se i+shift < real_len
+            # (nessun giro necessario), altrimenti "wrap".
+            idx = np.arange(full_len)
+            m_main = (idx + shift < full_len).astype(float)
+            m_wrap = 1.0 - m_main
+            full_main = np.zeros(1 << math.ceil(math.log2(full_len)))
+            full_main[:full_len] = m_main
+            full_wrap = np.zeros_like(full_main)
+            full_wrap[:full_len] = m_wrap
+            mask_cache[key] = (cc.MakeCKKSPackedPlaintext(full_main.tolist()),
+                                cc.MakeCKKSPackedPlaintext(full_wrap.tolist()))
+        m_main_pt, m_wrap_pt = mask_cache[key]
+        r_main = cc.EvalRotate(ct, shift)
+        r_wrap = cc.EvalRotate(ct, shift - real_len)
+        t_main = cc.EvalMult(r_main, m_main_pt)
+        t_wrap = cc.EvalMult(r_wrap, m_wrap_pt)
+        return cc.EvalAdd(t_main, t_wrap)
+
     result = None
     partial = ct_row
     remaining = W
@@ -63,12 +96,12 @@ def sum_within_row_strided_fhe(cc, ct_row, n, W):
     power = 1
     while remaining > 0:
         if remaining & 1:
-            shifted = cc.EvalRotate(partial, shift_base * n) if shift_base > 0 else partial
+            shifted = rotate_correct(partial, shift_base * n)
             result = shifted if result is None else cc.EvalAdd(result, shifted)
             shift_base += power
         remaining >>= 1
         if remaining > 0:
-            shifted_p = cc.EvalRotate(partial, power * n)
+            shifted_p = rotate_correct(partial, power * n)
             partial = cc.EvalAdd(partial, shifted_p)
             power *= 2
     return result
@@ -88,7 +121,14 @@ def main():
 
     cc, keys = build_small_context(batch_size)
 
-    rot_list = sorted(set(k * n for k in [1, 2, 4] if k * n < batch_size))
+    real_len_for_keys = Wp * n
+    rot_set = set()
+    for k in [1, 2, 4]:
+        shift = k * n
+        if shift < batch_size:
+            rot_set.add(shift)
+            rot_set.add(shift - real_len_for_keys)  # per la correzione del wraparound
+    rot_list = sorted(r for r in rot_set if r != 0)
     cc.EvalRotateKeyGen(keys.secretKey, rot_list)
     cc.SetRotationKeyCache(1 * GiB)
     cc.LoadContext(keys.publicKey)
@@ -116,15 +156,17 @@ def main():
     rows_ct = [enc(pack_row(r, x_padded)) for r in range(Hp)]
 
     print("Calcolo media/varianza (somma a passi dentro riga + tra righe, SOLO righe valide)...")
+    real_len = Wp * n
+    mask_cache = {}
     t0 = time.time()
-    row_sums = [sum_within_row_strided_fhe(cc, rows_ct[r], n, Wp) for r in range(H)]
+    row_sums = [sum_within_row_strided_fhe(cc, rows_ct[r], n, Wp, real_len, mask_cache) for r in range(H)]
     total_sum = row_sums[0]
     for r in row_sums[1:]:
         total_sum = cc.EvalAdd(total_sum, r)
     mean_ct = cc.EvalMult(total_sum, 1.0 / (H * W))
 
     rows_sq = [cc.EvalMult(rows_ct[r], rows_ct[r]) for r in range(H)]
-    row_sums_sq = [sum_within_row_strided_fhe(cc, rows_sq[r], n, Wp) for r in range(H)]
+    row_sums_sq = [sum_within_row_strided_fhe(cc, rows_sq[r], n, Wp, real_len, mask_cache) for r in range(H)]
     total_sum_sq = row_sums_sq[0]
     for r in row_sums_sq[1:]:
         total_sum_sq = cc.EvalAdd(total_sum_sq, r)
