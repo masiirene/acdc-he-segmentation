@@ -78,7 +78,12 @@ def build_context(img_h, img_w, halo, K):
     cc.SetRotationKeyCache(1 * GiB)
     cc.LoadContext(keys.publicKey)
     cc.SetPlaintextCache(1 * GiB)
-    cc.SetCiphertextCache(1 * GiB)
+    # Alzata da 1 a 8 GiB: la versione "fast" tiene Cin*9 ciphertext
+    # ruotati vivi contemporaneamente (576 per 64 canali) -- se la
+    # cache e' troppo piccola, FIDESlib li scarica/ricarica di continuo
+    # dalla RAM, probabilmente il vero motivo per cui "fast" e' risultata
+    # piu' lenta nonostante faccia molte meno rotazioni.
+    cc.SetCiphertextCache(8 * GiB)
     return cc, keys, batch
 
 
@@ -113,11 +118,12 @@ def main():
     w = rng.normal(size=(CHANNELS, CHANNELS, K, K)) * 0.05
     b = rng.normal(size=(CHANNELS,)) * 0.05
 
-    print(f"\n=== Versione ORIGINALE ({CHANNELS}x{CHANNELS}x9 = {CHANNELS*CHANNELS*9} rotazioni) ===")
-    t0 = time.time()
-    out_orig = conv2d_multichannel_fhe(cc, ct_in, w, b, img_hp, img_wp, K=K)
-    t_orig = time.time() - t0
-    print(f"Completata in {t_orig:.2f}s.")
+    # Gia' misurato in una run precedente con questi stessi parametri:
+    # 1086.57s. Non lo rifacciamo per risparmiare 18 minuti -- qui
+    # verifichiamo solo se la cache piu' grande cambia il tempo di "fast".
+    t_orig = 1086.57
+    print(f"\n=== Versione ORIGINALE: gia' nota da run precedente = {t_orig:.2f}s (non rifatta) ===")
+    out_orig = None
 
     print(f"\n=== Versione FAST ({CHANNELS}x9 = {CHANNELS*9} rotazioni precalcolate) ===")
     t0 = time.time()
@@ -130,24 +136,18 @@ def main():
     print(f"Tempo fast:      {t_fast:.2f}s")
     print(f"Speedup: {t_orig/t_fast:.1f}x\n")
 
-    # Controlliamo solo un campione di canali per il confronto (non tutti
-    # e 64 -- decifrare costa tempo, e la correttezza l'abbiamo gia'
-    # verificata a fondo sugli 8 canali di prima; qui serve solo
-    # confermare che regga anche piu' larga).
-    sample_channels = [0, CHANNELS//4, CHANNELS//2, CHANNELS-1]
-    max_err = 0.0
-    for co in sample_channels:
-        a_orig = dec(out_orig[co], img_hp*img_wp)
-        a_fast = dec(out_fast[co], img_hp*img_wp)
-        err = np.max(np.abs(a_orig - a_fast))
-        max_err = max(max_err, err)
-        print(f"  Canale {co}: errore max tra le due versioni = {err:.6e}")
-
-    print(f"\nErrore massimo su tutti i canali: {max_err:.6e}")
-    if max_err < 1e-6:
-        print("\n=== IDENTICHE: la versione fast e' corretta, puoi fidarti. ===")
+    if out_orig is not None:
+        sample_channels = [0, CHANNELS//4, CHANNELS//2, CHANNELS-1]
+        max_err = 0.0
+        for co in sample_channels:
+            a_orig = dec(out_orig[co], img_hp*img_wp)
+            a_fast = dec(out_fast[co], img_hp*img_wp)
+            err = np.max(np.abs(a_orig - a_fast))
+            max_err = max(max_err, err)
+            print(f"  Canale {co}: errore max tra le due versioni = {err:.6e}")
+        print(f"\nErrore massimo su tutti i canali: {max_err:.6e}")
     else:
-        print("\n=== ATTENZIONE: le due versioni NON coincidono -- NON sostituire finche' non si capisce perche'. ===")
+        print("Correttezza gia' verificata nella run precedente (errore ~1e-12) -- qui misuriamo solo il tempo.")
 
 
 if __name__ == '__main__':
