@@ -36,7 +36,8 @@ LEVEL_BUDGET = [4, 4]
 BSGS_DIM = [4, 4]
 CACHE_GIB = 1
 
-CHANNELS = 32
+CHANNELS = 64  # prossimo stage vero (enc1/dec1) -- stesso schema appena
+               # confermato a 32, verifichiamo che regga anche qui
 IMG_W = 224
 HALO = 1
 WP = IMG_W + 2 * HALO  # 226
