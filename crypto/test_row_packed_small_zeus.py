@@ -37,7 +37,10 @@ import fideslib_py as fhe
 
 GiB = 1 << 30
 DEPTH = 15  # profondita' minima, niente bootstrap, caso piccolo
-RING_POW = 14  # ring piccolo, sufficiente per poche decine di slot -- piu' veloce da costruire
+RING_POW = 17  # la libreria impone questo per lo standard di sicurezza a
+               # questa profondita', anche se usiamo pochi slot -- il
+               # BATCH (quanti slot usiamo davvero) resta comunque
+               # piccolo e separato, impostato sotto con SetBatchSize
 
 
 def build_small_context(batch_size):
