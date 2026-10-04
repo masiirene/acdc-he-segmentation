@@ -25,7 +25,9 @@ import fideslib_py as fhe
 from crypto.fhe_ops_single_ciphertext import poly_act_fhe, isqrt_chebyshev_fhe, fit_monotonic_isqrt_coeffs
 
 GiB = 1 << 30
-DEPTH = 15
+DEPTH = 35  # alzata da 15: le correzioni a maschera della somma a passi
+            # consumano piu' livelli del previsto, probabile causa del
+            # segmentation fault al Chebyshev
 RING_POW = 17
 
 
@@ -34,8 +36,13 @@ def build_small_context(batch_size):
     params.SetSecurityLevel(fhe.HEStd_128_classic)
     params.SetRingDim(1 << RING_POW)
     params.SetMultiplicativeDepth(DEPTH)
-    params.SetScalingModSize(50)
-    params.SetFirstModSize(55)
+    # Allineati ai contesti in cui isqrt_chebyshev_fhe e' gia' stato
+    # verificato (59/60 bit, 3 cifre grandi). Precauzione dopo un
+    # segmentation fault al Chebyshev: causa NON confermata, qui
+    # eliminiamo solo la differenza di parametri come variabile.
+    params.SetScalingModSize(59)
+    params.SetFirstModSize(60)
+    params.SetNumLargeDigits(3)
     params.SetBatchSize(batch_size)
     params.SetScalingTechnique(fhe.FLEXIBLEAUTO)
     params.SetKeySwitchTechnique(fhe.HYBRID)
@@ -197,10 +204,45 @@ def main():
     print(mean_full_he)
     print(f"Atteso in ogni riga: {mean_ref}\n")
 
-    print("Applicazione Chebyshev (radice inversa) + norm + PolyAct, su ogni riga valida...")
+    print(f"Livello di mean_ct: {mean_ct.GetLevel()}", flush=True)
+    print(f"Livello di var_ct PRIMA del Chebyshev: {var_ct.GetLevel()} (su {DEPTH} disponibili)", flush=True)
+    print("Applicazione Chebyshev (radice inversa) + norm + PolyAct, su ogni riga valida...", flush=True)
     x_min_t, x_max_t = max(0.01, var_ref.min() * 0.5), var_ref.max() * 2.0
+    print(f"Dominio Chebyshev scelto: [{x_min_t:.4f}, {x_max_t:.4f}]", flush=True)
     cheb_coeffs, shift = fit_monotonic_isqrt_coeffs(fhe, x_min_t, x_max_t, degree=3, extra_safety=1.2)
+    print(f"Coefficienti Chebyshev calcolati (shift={shift:.4f}), ora EvalChebyshevSeries...", flush=True)
     inv_std_ct = isqrt_chebyshev_fhe(cc, var_ct, cheb_coeffs, [x_min_t, x_max_t], post_iter=1)
+    print(f"Chebyshev completato, livello inv_std_ct: {inv_std_ct.GetLevel()}", flush=True)
+
+    # --- Emulazione numpy della STESSA approssimazione (stessi coefficienti,
+    # stessa convenzione di clenshaw_unit in fit_monotonic_isqrt_coeffs, stesso
+    # mapping del dominio e stesso passo di Newton di isqrt_chebyshev_fhe).
+    # Serve a separare "bug della pipeline HE" da "errore dell'approssimazione".
+    def emulate_isqrt(var_vals):
+        scale = 2.0 / (x_max_t - x_min_t)
+        offset = -(x_min_t + x_max_t) / (x_max_t - x_min_t)
+        out = []
+        for v in var_vals:
+            t = scale * v + offset
+            b1 = b2 = 0.0
+            for c in reversed(cheb_coeffs[1:]):
+                b1, b2 = 2.0 * t * b1 - b2 + c, b1
+            y = t * b1 - b2 + cheb_coeffs[0] / 2.0
+            y = y * (1.5 - 0.5 * v * y * y)  # un passo di Newton (post_iter=1)
+            out.append(y)
+        return np.array(out)
+
+    pt_inv = cc.Decrypt(keys.secretKey, inv_std_ct)
+    pt_inv.SetLength(n)
+    inv_he = np.array(pt_inv.GetRealPackedValue())
+    inv_exact = 1.0 / np.sqrt(var_ref)
+    inv_emu = emulate_isqrt(var_ref)
+    print("\n=== DEBUG: inv_std per canale ===")
+    print(f"  HE:               {np.round(inv_he, 5)}")
+    print(f"  emulato (numpy):  {np.round(inv_emu, 5)}")
+    print(f"  esatto 1/sqrt:    {np.round(inv_exact, 5)}")
+    print(f"  |HE - emulato| max = {np.max(np.abs(inv_he - inv_emu)):.3e}   <- pipeline HE")
+    print(f"  |emulato - esatto| max = {np.max(np.abs(inv_emu - inv_exact)):.3e}   <- costo dell'approssimazione\n")
 
     gamma_tiled = np.tile(gamma, Wp)
     gamma_full = np.zeros(batch_size)
@@ -220,28 +262,37 @@ def main():
         activated = poly_act_fhe(cc, scaled, a_, b_, c_)
         out_rows.append(activated)
 
-    print("\nVerifica finale contro riferimento numpy...")
-    ref_out = np.zeros((Cout, H, W))
-    for ch in range(Cout):
-        normalized_ref = (x[ch] - mean_ref[ch]) / np.sqrt(var_ref[ch] + 1e-5)
-        scaled_ref = normalized_ref * gamma[ch] + beta[ch]
-        ref_out[ch] = a_ * scaled_ref**2 + b_ * scaled_ref + c_
+    print("\nVerifica finale contro DUE riferimenti numpy...")
 
-    max_err = 0.0
+    def reference(inv_std_per_channel):
+        out = np.zeros((Cout, H, W))
+        for ch in range(Cout):
+            normalized_ref = (x[ch] - mean_ref[ch]) * inv_std_per_channel[ch]
+            scaled_ref = normalized_ref * gamma[ch] + beta[ch]
+            out[ch] = a_ * scaled_ref**2 + b_ * scaled_ref + c_
+        return out
+
+    ref_approx = reference(inv_emu)      # stessa approssimazione dell'HE
+    ref_exact = reference(inv_exact)     # radice inversa esatta
+
+    max_err_approx = 0.0
+    max_err_exact = 0.0
     for r in range(H):
         pt = cc.Decrypt(keys.secretKey, out_rows[r])
         pt.SetLength(batch_size)
         he_row = np.array(pt.GetRealPackedValue())[:Wp * n].reshape(Wp, n)[:W, :Cout]
-        ref_row = ref_out[:, r, :].T
-        err = np.max(np.abs(he_row - ref_row))
-        max_err = max(max_err, err)
-        print(f"  Riga {r}: errore max = {err:.6e}")
+        e_a = np.max(np.abs(he_row - ref_approx[:, r, :].T))
+        e_e = np.max(np.abs(he_row - ref_exact[:, r, :].T))
+        max_err_approx = max(max_err_approx, e_a)
+        max_err_exact = max(max_err_exact, e_e)
+        print(f"  Riga {r}: vs approssimato = {e_a:.3e}   vs esatto = {e_e:.3e}")
 
-    print(f"\nErrore massimo: {max_err:.6e}")
-    if max_err < 1e-2:
-        print("\n=== FUNZIONA: InstanceNorm+PolyAct nel formato a righe, in HE vero. ===")
+    print(f"\nErrore max vs riferimento APPROSSIMATO (misura la pipeline HE): {max_err_approx:.3e}")
+    print(f"Errore max vs riferimento ESATTO (include il costo dell'approssimazione): {max_err_exact:.3e}")
+    if max_err_approx < 1e-3:
+        print("\n=== PIPELINE HE CORRETTA: l'errore residuo vs esatto e' l'approssimazione Chebyshev+Newton. ===")
     else:
-        print("\n=== ATTENZIONE: errore grande -- da investigare. ===")
+        print("\n=== ATTENZIONE: anche vs l'approssimato l'errore e' grande -- c'e' un bug nella pipeline HE. ===")
 
 
 if __name__ == '__main__':

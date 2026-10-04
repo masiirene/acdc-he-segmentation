@@ -32,11 +32,16 @@ import fideslib_py as fhe
 GiB = 1 << 30
 DEPTH = 43
 RING_POW = 17
-LEVEL_BUDGET = [4, 4]
-BSGS_DIM = [4, 4]
 CACHE_GIB = 1
 
-CHANNELS = 32  # larghezza vera di enc0/dec0 -- il primo passo, non 256
+# Da riga di comando, per fare uno sweep del SOLO bootstrap (minuti, non
+# i 48 della convoluzione):
+#   python3 crypto/test_row_format_bootstrap_zeus.py [CANALI [LB1 LB2 [BSGS1 BSGS2]]]
+# BSGS 0 0 = lascia scegliere alla libreria. Caso che ha fallito:
+#   python3 crypto/test_row_format_bootstrap_zeus.py 128 4 4 4 4
+CHANNELS = int(sys.argv[1]) if len(sys.argv) > 1 else 128  # a 128 il bootstrap dopo la conv dava errore ~0.5 (prima del bootstrap: 5e-12)
+LEVEL_BUDGET = [int(sys.argv[2]), int(sys.argv[3])] if len(sys.argv) > 3 else [4, 4]
+BSGS_DIM = [int(sys.argv[4]), int(sys.argv[5])] if len(sys.argv) > 5 else [4, 4]
 IMG_W = 224
 HALO = 1
 WP = IMG_W + 2 * HALO  # 226
@@ -108,38 +113,45 @@ def main():
     print_gpu_mem("dopo LoadContext")
 
     rng = np.random.default_rng(3)
-    data = rng.normal(size=real_len) * 0.5 + 1.0  # valori in un range ragionevole
-    full = np.zeros(batch_size)
-    full[:real_len] = data
 
-    pt = cc.MakeCKKSPackedPlaintext(full.tolist())
-    ct = cc.Encrypt(keys.publicKey, pt)
-    print(f"\nRiga cifrata (livello {ct.GetLevel()}).")
+    def run_case(label, data):
+        """Cifra, consuma 5 livelli, bootstrap, e analizza l'errore PER REGIONE
+        (non solo il massimo): dati veri vs padding, primo/ultimo quarto dei
+        blocchi-pixel, per capire se l'errore e' uniforme (rumore) o
+        concentrato in una zona (problema strutturale)."""
+        full = np.zeros(batch_size)
+        full[:real_len] = data
+        ct = cc.Encrypt(keys.publicKey, cc.MakeCKKSPackedPlaintext(full.tolist()))
+        for _ in range(5):
+            ct = cc.EvalMult(ct, 1.01)
+        t0 = time.time()
+        ct_boot = cc.EvalBootstrap(ct)
+        print(f"\n[{label}] bootstrap in {time.time()-t0:.2f}s, livello dopo: {ct_boot.GetLevel()}", flush=True)
+        pt_out = cc.Decrypt(keys.secretKey, ct_boot)
+        pt_out.SetLength(batch_size)
+        res = np.array(pt_out.GetRealPackedValue())
+        expected = np.zeros(batch_size)
+        expected[:real_len] = data * (1.01 ** 5)
+        diff = np.abs(res - expected)
+        print(f"[{label}] ampiezza dati: media|x|={np.mean(np.abs(data)):.3f}, max|x|={np.max(np.abs(data)):.3f}")
+        print(f"[{label}] errore max sui dati veri: {diff[:real_len].max():.3e}  (medio {diff[:real_len].mean():.3e})")
+        print(f"[{label}] errore max nel padding (atteso ~0): {diff[real_len:].max():.3e}")
+        q = real_len // 4
+        for i in range(4):
+            seg = diff[i*q:(i+1)*q]
+            print(f"[{label}]   quarto {i+1} dei dati: errore max {seg.max():.3e}")
+        return diff[:real_len].max()
 
-    # Simuliamo un po' di "consumo" di profondita' prima del bootstrap
-    # (altrimenti testiamo il bootstrap su un ciphertext troppo fresco,
-    # non rappresentativo di dove servirebbe davvero nella pipeline)
-    for _ in range(5):
-        ct = cc.EvalMult(ct, 1.01)
-    print(f"Dopo 5 moltiplicazioni di prova, livello: {ct.GetLevel()}")
-    print_gpu_mem("prima del bootstrap")
+    # Caso A: dati "grandi" (come nei test precedenti riusciti a 32/64 canali)
+    err_a = run_case("dati ~N(1,0.5)", rng.normal(size=real_len) * 0.5 + 1.0)
+    # Caso B: dati "piccoli e centrati", come l'output vero della convoluzione
+    # (pesi 0.1/sqrt(n*9), input N(0,1) -> output con std ~0.1)
+    err_b = run_case("dati ~N(0,0.1) tipo conv", rng.normal(size=real_len) * 0.1)
 
-    print("\nBootstrap...")
-    t0 = time.time()
-    ct_boot = cc.EvalBootstrap(ct)
-    print(f"Completato in {time.time()-t0:.2f}s, livello dopo: {ct_boot.GetLevel()}")
-    print_gpu_mem("dopo il bootstrap")
-
-    pt_out = cc.Decrypt(keys.secretKey, ct_boot)
-    pt_out.SetLength(real_len)
-    result = np.array(pt_out.GetRealPackedValue())
-    err = np.max(np.abs(result - data * (1.01 ** 5)))
-    print(f"\nErrore massimo dopo bootstrap: {err:.6e}")
-
-    if err < 1e-2:
-        print("\n=== Bootstrap funziona correttamente sul formato a righe, larghezza reale. ===")
-    else:
-        print("\n=== ATTENZIONE: errore grande, da investigare. ===")
+    print_gpu_mem("fine")
+    print(f"\nRIEPILOGO a {CHANNELS} canali (batch {batch_size}), level_budget={LEVEL_BUDGET}, bsgsDim={BSGS_DIM}: "
+          f"errore caso A = {err_a:.3e}, caso B = {err_b:.3e}")
+    print("Riferimento: a 32 e 64 canali il bootstrap in conv+boot dava ~5e-4.")
 
 
 if __name__ == '__main__':
