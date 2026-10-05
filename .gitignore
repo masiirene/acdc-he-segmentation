@@ -37,3 +37,4 @@ crypto/ws_sum_collapse_report.json
 # pacchetti per Zeus: contengono fette del dataset ACDC, si rigenerano con pack_for_zeus.py
 crypto/pack_*.npz
 __pycache__/
+crypto/real_weights*.npz
