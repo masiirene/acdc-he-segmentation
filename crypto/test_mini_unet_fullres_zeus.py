@@ -173,7 +173,7 @@ def he_upconv(he, chans, w, b, level_in):
         cc.TrimGPUMemoryPool()
     outs = []
     for co in range(cout):
-        o = cc.EvalMult(cc.EvalAdd(acc[co], float(b[co])), mask)
+        o = he.mask_mult(cc.EvalAdd(acc[co], float(b[co])), mask)
         o.Offload()
         outs.append(o)
     cc.TrimGPUMemoryPool()
