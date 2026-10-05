@@ -1,0 +1,464 @@
+{
+  "dec0.block.1": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec0.block.4": {
+    "baseline_iterations": 9,
+    "baseline_depth": 27,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 9,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 29
+      },
+      "3": {
+        "iterations": 5,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 18
+      },
+      "4": {
+        "iterations": 4,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 16
+      }
+    }
+  },
+  "dec1.block.1": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec1.block.4": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 3,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 11
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 2,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 10
+      }
+    }
+  },
+  "dec2.block.1": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 1,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 5
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec2.block.4": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec3.block.1": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 1,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 5
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec3.block.4": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec4.block.1": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "dec4.block.4": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc0.block.1": {
+    "baseline_iterations": 9,
+    "baseline_depth": 27,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 7,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 23
+      },
+      "3": {
+        "iterations": 5,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 18
+      },
+      "4": {
+        "iterations": 4,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 16
+      }
+    }
+  },
+  "enc0.block.4": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc1.block.1": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 3,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 11
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 2,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 10
+      }
+    }
+  },
+  "enc1.block.4": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc2.block.1": {
+    "baseline_iterations": 6,
+    "baseline_depth": 18,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 2,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 9
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc2.block.4": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc3.block.1": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc3.block.4": {
+    "baseline_iterations": 4,
+    "baseline_depth": 12,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 1,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 5
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 0,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 4
+      }
+    }
+  },
+  "enc4.block.1": {
+    "baseline_iterations": 4,
+    "baseline_depth": 12,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 1,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 5
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 0,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 4
+      }
+    }
+  },
+  "enc4.block.4": {
+    "baseline_iterations": 4,
+    "baseline_depth": 12,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 1,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 5
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 0,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 4
+      }
+    }
+  },
+  "enc5.block.1": {
+    "baseline_iterations": 5,
+    "baseline_depth": 15,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 2,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 8
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 1,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 7
+      }
+    }
+  },
+  "enc5.block.4": {
+    "baseline_iterations": 4,
+    "baseline_depth": 12,
+    "chebyshev_options": {
+      "2": {
+        "iterations": 1,
+        "poly_degree": 2,
+        "total_depth_incl_poly": 5
+      },
+      "3": {
+        "iterations": 1,
+        "poly_degree": 3,
+        "total_depth_incl_poly": 6
+      },
+      "4": {
+        "iterations": 0,
+        "poly_degree": 4,
+        "total_depth_incl_poly": 4
+      }
+    }
+  }
+}

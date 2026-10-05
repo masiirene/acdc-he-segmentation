@@ -1,0 +1,10 @@
+{
+  "enc0.block.1": {
+    "y0": 0.8155257899524566,
+    "iterations_needed": 9
+  },
+  "dec0.block.4": {
+    "y0": 0.22131123579224224,
+    "iterations_needed": 9
+  }
+}

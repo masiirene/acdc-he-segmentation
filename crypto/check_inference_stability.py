@@ -62,6 +62,10 @@ def main():
                          "--weight_standardization (i pesi Conv2d vengono standardizzati "
                          "ad ogni forward tramite WSConv2d) -- altrimenti si carica un "
                          "modello architetturalmente diverso da quello allenato.")
+    parser.add_argument('--filters', type=int, nargs=6, default=None,
+                        help="6 interi [enc0..enc5], DEVE corrispondere esattamente ai filters "
+                         "con cui e' stato allenato il checkpoint, altrimenti mismatch di shape.")
+    parser.add_argument('--skip_mode', type=str, default='concat', choices=['concat', 'sum'])
     args = parser.parse_args()
 
     device = torch.device('mps') if torch.backends.mps.is_available() else \
@@ -70,8 +74,9 @@ def main():
     print(f'norm_mode: {args.norm_mode}')
 
     model = HEFriendlyUNet(in_channels=1, num_classes=4, act_type='poly',
-                           norm_type='instance', norm_mode=args.norm_mode,
-                           weight_standardization=args.weight_standardization).to(device)
+                            norm_type='instance', norm_mode=args.norm_mode,
+                            weight_standardization=args.weight_standardization,
+                            filters=args.filters, skip_mode=args.skip_mode).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
     # strict=False: necessario se il checkpoint contiene buffer di popolazione
     # (running_mean/var/num_batches_tracked) non presenti in un modello

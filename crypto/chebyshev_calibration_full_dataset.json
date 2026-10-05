@@ -1,0 +1,366 @@
+{
+  "dec0.block.1": {
+    "cheb_coeffs": [
+      0.8341362130667964,
+      -0.6131402663471311,
+      0.2994284030080654,
+      -0.16076808483452304,
+      0.09023918445005383,
+      -0.05198117348426309
+    ],
+    "cheb_domain": [
+      0.20744539760053157,
+      4.217551796436328
+    ],
+    "post_iter": 2,
+    "poly_degree": 5,
+    "total_depth": 11,
+    "shift_applied": 0.06987428525385839,
+    "max_overshoot_observed": 0.058228571044881994,
+    "n_calibration_samples": 11776
+  },
+  "dec1.block.1": {
+    "cheb_coeffs": [
+      1.1253122288994069,
+      -0.7345852088941103,
+      0.31310406764733456,
+      -0.14714931041123078
+    ],
+    "cheb_domain": [
+      0.14817962116003036,
+      1.8559829961776804
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.12915077660766866,
+    "max_overshoot_observed": 0.10762564717305723,
+    "n_calibration_samples": 23552
+  },
+  "dec1.block.4": {
+    "cheb_coeffs": [
+      0.6971664730410095,
+      -0.5568336662808073,
+      0.28494669624825386,
+      -0.16011268869498171,
+      0.09400257343953937,
+      -0.05662180316529127
+    ],
+    "cheb_domain": [
+      0.24378927370905876,
+      6.048092927742125
+    ],
+    "post_iter": 2,
+    "poly_degree": 5,
+    "total_depth": 11,
+    "shift_applied": 0.0826321406272247,
+    "max_overshoot_observed": 0.06886011718935392,
+    "n_calibration_samples": 23552
+  },
+  "dec2.block.1": {
+    "cheb_coeffs": [
+      1.090625737784824,
+      -0.6035486112690769,
+      0.21900263006762505
+    ],
+    "cheb_domain": [
+      0.20709858857095242,
+      1.665022934961326
+    ],
+    "post_iter": 2,
+    "poly_degree": 2,
+    "total_depth": 8,
+    "shift_applied": 0.1309045811719211,
+    "max_overshoot_observed": 0.10908715097660093,
+    "n_calibration_samples": 47104
+  },
+  "dec2.block.4": {
+    "cheb_coeffs": [
+      0.721615133411063,
+      -0.5270743372155475,
+      0.24951580422942693,
+      -0.12996469955122053,
+      0.07079153706146676
+    ],
+    "cheb_domain": [
+      0.28455318531394,
+      5.120275578689591
+    ],
+    "post_iter": 2,
+    "poly_degree": 4,
+    "total_depth": 10,
+    "shift_applied": 0.08232045631734257,
+    "max_overshoot_observed": 0.06860038026445214,
+    "n_calibration_samples": 47104
+  },
+  "dec3.block.1": {
+    "cheb_coeffs": [
+      1.0315620008834363,
+      -0.5168741406065299,
+      0.17457120217448738
+    ],
+    "cheb_domain": [
+      0.2693135581016541,
+      1.8360866443634192
+    ],
+    "post_iter": 2,
+    "poly_degree": 2,
+    "total_depth": 8,
+    "shift_applied": 0.09571269144159604,
+    "max_overshoot_observed": 0.07976057620133004,
+    "n_calibration_samples": 94208
+  },
+  "dec3.block.4": {
+    "cheb_coeffs": [
+      0.85380571553667,
+      -0.5724452155503368,
+      0.2480993222517934,
+      -0.11852507217278471
+    ],
+    "cheb_domain": [
+      0.24431810019910336,
+      3.226921447849278
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.10650170892473598,
+    "max_overshoot_observed": 0.08875142410394665,
+    "n_calibration_samples": 94208
+  },
+  "dec4.block.1": {
+    "cheb_coeffs": [
+      1.6910564659799985,
+      -1.1600561015082262,
+      0.5287212369710439,
+      -0.2653622229443801,
+      0.13932683191345654
+    ],
+    "cheb_domain": [
+      0.05931824418529868,
+      0.9286820135593439
+    ],
+    "post_iter": 2,
+    "poly_degree": 4,
+    "total_depth": 10,
+    "shift_applied": 0.15258468834242933,
+    "max_overshoot_observed": 0.12715390695202444,
+    "n_calibration_samples": 47104
+  },
+  "dec4.block.4": {
+    "cheb_coeffs": [
+      1.7598114409249344,
+      -1.0334464307909577,
+      0.4103242870471143,
+      -0.1798391470296749
+    ],
+    "cheb_domain": [
+      0.0736635217294097,
+      0.7482170678615772
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.1430183295513988,
+    "max_overshoot_observed": 0.11918194129283233,
+    "n_calibration_samples": 47104
+  },
+  "enc0.block.4": {
+    "cheb_coeffs": [
+      0.4244214057848029,
+      -0.29400538133076365,
+      0.1348218921711778,
+      -0.06807286450510955,
+      0.0359539921436041
+    ],
+    "cheb_domain": [
+      0.9224753692746163,
+      14.760057106018476
+    ],
+    "post_iter": 2,
+    "poly_degree": 4,
+    "total_depth": 10,
+    "shift_applied": 0.0397553972308494,
+    "max_overshoot_observed": 0.0331294976923745,
+    "n_calibration_samples": 11776
+  },
+  "enc1.block.1": {
+    "cheb_coeffs": [
+      0.6564382150932329,
+      -0.5187136476306866,
+      0.26394000146916563,
+      -0.1474950184912954,
+      0.08612551908715944,
+      -0.05159796199421741
+    ],
+    "cheb_domain": [
+      0.28221733582019803,
+      6.8271988294602295
+    ],
+    "post_iter": 2,
+    "poly_degree": 5,
+    "total_depth": 11,
+    "shift_applied": 0.07454608949385814,
+    "max_overshoot_observed": 0.06212174124488179,
+    "n_calibration_samples": 23552
+  },
+  "enc1.block.4": {
+    "cheb_coeffs": [
+      0.561832578513924,
+      -0.3264149263379501,
+      0.12861767480996963,
+      -0.0559496177747557
+    ],
+    "cheb_domain": [
+      0.7364094226360322,
+      7.323823475074773
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.04403093723329898,
+    "max_overshoot_observed": 0.03669244769441582,
+    "n_calibration_samples": 23552
+  },
+  "enc2.block.1": {
+    "cheb_coeffs": [
+      0.7077305535310736,
+      -0.5239385477213583,
+      0.24995104944212207,
+      -0.13117533194642736,
+      0.07198539797257394
+    ],
+    "cheb_domain": [
+      0.2871450782418251,
+      5.321938771820076
+    ],
+    "post_iter": 2,
+    "poly_degree": 4,
+    "total_depth": 10,
+    "shift_applied": 0.08474532226000377,
+    "max_overshoot_observed": 0.07062110188333648,
+    "n_calibration_samples": 47104
+  },
+  "enc2.block.4": {
+    "cheb_coeffs": [
+      0.6307958941090434,
+      -0.35074115480351886,
+      0.13385573238070947,
+      -0.05642156372816369
+    ],
+    "cheb_domain": [
+      0.6295003720521927,
+      5.746275762748773
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.04250502873734265,
+    "max_overshoot_observed": 0.03542085728111888,
+    "n_calibration_samples": 47104
+  },
+  "enc3.block.1": {
+    "cheb_coeffs": [
+      0.7945788242228602,
+      -0.4356297424075623,
+      0.16451324906666898,
+      -0.06862811978179992
+    ],
+    "cheb_domain": [
+      0.40606654301285744,
+      3.6069558288574246
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.050967684293031466,
+    "max_overshoot_observed": 0.04247307024419289,
+    "n_calibration_samples": 94208
+  },
+  "enc3.block.4": {
+    "cheb_coeffs": [
+      0.6339482021769451,
+      -0.2986723213042587,
+      0.09625129447331474
+    ],
+    "cheb_domain": [
+      0.7775546832084655,
+      4.800986243247986
+    ],
+    "post_iter": 2,
+    "poly_degree": 2,
+    "total_depth": 8,
+    "shift_applied": 0.04990108197645573,
+    "max_overshoot_observed": 0.041584234980379775,
+    "n_calibration_samples": 94208
+  },
+  "enc4.block.1": {
+    "cheb_coeffs": [
+      0.8141396403023611,
+      -0.3541864491551054,
+      0.10714393761616763
+    ],
+    "cheb_domain": [
+      0.5230390198230743,
+      2.8530575772285713
+    ],
+    "post_iter": 2,
+    "poly_degree": 2,
+    "total_depth": 8,
+    "shift_applied": 0.05154629193158167,
+    "max_overshoot_observed": 0.042955243276318056,
+    "n_calibration_samples": 47104
+  },
+  "enc4.block.4": {
+    "cheb_coeffs": [
+      1.6061993913322243,
+      -0.7618247907163899,
+      0.2467882575367435
+    ],
+    "cheb_domain": [
+      0.12002193542569876,
+      0.7490172293901449
+    ],
+    "post_iter": 2,
+    "poly_degree": 2,
+    "total_depth": 8,
+    "shift_applied": 0.12873915478603964,
+    "max_overshoot_observed": 0.10728262898836638,
+    "n_calibration_samples": 47104
+  },
+  "enc5.block.1": {
+    "cheb_coeffs": [
+      2.1609973692851283,
+      -1.173580502329027,
+      0.44003664966590905,
+      -0.18227311286767472
+    ],
+    "cheb_domain": [
+      0.05575457359850407,
+      0.4862644654870073
+    ],
+    "post_iter": 2,
+    "poly_degree": 3,
+    "total_depth": 9,
+    "shift_applied": 0.13406198992620036,
+    "max_overshoot_observed": 0.11171832493850031,
+    "n_calibration_samples": 23552
+  },
+  "enc5.block.4": {
+    "cheb_coeffs": [
+      3.5705632648665255,
+      -1.659477993299672,
+      0.5291514682017169
+    ],
+    "cheb_domain": [
+      0.024965582929551602,
+      0.1508690033555054
+    ],
+    "post_iter": 2,
+    "poly_degree": 2,
+    "total_depth": 8,
+    "shift_applied": 0.2709072965423875,
+    "max_overshoot_observed": 0.22575608045198958,
+    "n_calibration_samples": 23552
+  }
+}

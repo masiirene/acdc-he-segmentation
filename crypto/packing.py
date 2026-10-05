@@ -261,7 +261,103 @@ def instance_norm_eval(x, running_mean, running_var, gamma, beta, eps=1e-5):
     return out
 
 
-def instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w, eps=1e-5):
+def evaluate_chebyshev_poly(x, coeffs, domain):
+    """
+    Valuta un polinomio di Chebyshev (nella base standard di Chebyshev,
+    coefficienti come restituiti da numpy.polynomial.chebyshev.Chebyshev.fit(...).coef)
+    su un valore x, usando la ricorrenza di Clenshaw -- che richiede
+    SOLO moltiplicazioni e somme (nessuna divisione, nessun confronto),
+    quindi e' direttamente traducibile in operazioni CKKS.
+
+    Il mapping affine da [domain[0], domain[1]] a [-1, 1] (t = (2x -
+    (xmax+xmin)) / (xmax-xmin)) e' anch'esso solo moltiplicazione per
+    costante + somma di costante -- HE-native, nessuna operazione nuova
+    rispetto a quelle gia' usate altrove in questo modulo.
+
+    Costo in livelli di profondita': la ricorrenza di Clenshaw fa una
+    moltiplicazione ciphertext-per-ciphertext (t*b_k1) per ogni grado del
+    polinomio, in sequenza -- quindi un polinomio di grado n costa
+    APPROSSIMATIVAMENTE n livelli in questa forma "sequenziale" (la
+    stessa assunzione, pessimistica, gia' usata in
+    crypto/simulate_chebyshev_init_isqrt.py per il confronto costo/
+    beneficio). Schemi di valutazione "ad albero" potrebbero ridurre
+    questo a circa log2(n) livelli -- da verificare con la libreria HE
+    reale, non assunto qui.
+
+    Args:
+        x: valore (scalare o array) su cui valutare il polinomio
+        coeffs: coefficienti di Chebyshev, dal grado 0 al grado n
+        domain: [x_min, x_max] usato in fase di calibrazione (fit del
+           polinomio) -- deve coincidere con quello usato per calcolare
+           'coeffs', altrimenti il mapping affine e' sbagliato
+
+    Returns:
+        Approssimazione di f(x) (qui sempre 1/sqrt(x)), stessa shape di x.
+    """
+    x_min, x_max = domain
+    t = (2.0 * x - (x_max + x_min)) / (x_max - x_min)  # mappa a [-1, 1]: mult+add, HE-native
+
+    n = len(coeffs) - 1
+    b_k1 = 0.0
+    b_k2 = 0.0
+    for k in range(n, 0, -1):
+        b_k = coeffs[k] + 2.0 * t * b_k1 - b_k2
+        b_k2 = b_k1
+        b_k1 = b_k
+    return coeffs[0] + t * b_k1 - b_k2
+
+
+def newton_raphson_isqrt(x, y0, n_iter):
+    """
+    Approssimazione di 1/sqrt(x) tramite iterazione di Newton-Raphson,
+    usando SOLO le operazioni disponibili su un ciphertext CKKS
+    (moltiplicazione ciphertext-ciphertext, moltiplicazione per costante,
+    somma):
+
+        y_{n+1} = y_n * (1.5 - 0.5 * x * y_n^2)
+
+    Ogni iterazione costa 3 moltiplicazioni ciphertext-ciphertext (y*y,
+    x*(y*y), y*(1.5 - 0.5*...)) -- quindi 3 livelli di profondita'
+    moltiplicativa per iterazione. Nessuna operazione di confronto,
+    divisione o radice: solo mult/add, HE-native.
+
+    y0: punto di partenza -- puo' essere uno SCALARE fisso (schema
+        originale, calibrato sul massimo per layer -- vedi
+        crypto/simulate_newton_raphson_isqrt_v2.py) oppure un ARRAY della
+        stessa shape di x (schema Chebyshev: un punto di partenza diverso
+        per ogni valore, gia' vicino al risultato vero -- vedi
+        evaluate_chebyshev_poly() sopra). In entrambi i casi l'iterazione
+        successiva e' identica: e' solo il valore/i valori di partenza a
+        cambiare.
+
+        Con y0 scalare, DEVE essere calibrato su 1/sqrt(x_max), non sulla
+        media del range atteso: Newton-Raphson per questa funzione diverge
+        se capita un campione con x molto piu' grande di quello su cui y0
+        e' stato calibrato. Partire da 1/sqrt(x_max) garantisce invece
+        x*y0^2 <= 1 su ogni campione della calibrazione, quindi
+        convergenza monotona senza rischio di overshoot.
+
+    n_iter: numero di iterazioni, calibrato per layer (e per schema:
+        4-9 con y0 scalare, tipicamente 0-2 con y0 da Chebyshev).
+
+    Args:
+        x: array (qualunque shape) di valori su cui approssimare 1/sqrt(x)
+        y0: float o array, punto di partenza per questo layer
+        n_iter: int, numero di iterazioni per questo layer
+
+    Returns:
+        Approssimazione di 1/sqrt(x), stessa shape di x.
+    """
+    y = np.asarray(y0, dtype=np.float64) * np.ones_like(x, dtype=np.float64)
+    for _ in range(n_iter):
+        y = y * (1.5 - 0.5 * x * y * y)
+    return y
+
+
+def instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w, eps=1e-5,
+                                isqrt_y0=None, isqrt_n_iter=None,
+                                isqrt_cheb_coeffs=None, isqrt_cheb_domain=None,
+                                isqrt_cheb_post_iter=None):
     """
     InstanceNorm2d con statistiche PER-ISTANZA: media e varianza calcolate
     LIVE sull'immagine corrente (il singolo paziente cifrato), non piu'
@@ -291,16 +387,46 @@ def instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w, eps=1e-5):
        ciphertext-ciphertext, un livello moltiplicativo in piu' rispetto
        al solo calcolo della media) prima della stessa riduzione del
        punto 1-2.
-    4. 1/sqrt(var+eps): CKKS NON ha una radice quadrata nativa. Questo e'
-       il punto NON ancora HE-nativo di questa funzione -- serve
-       un'approssimazione dedicata (tipicamente iterazione di Newton-
-       Raphson, che converge in poche iterazioni se si conosce un range
-       plausibile per var+eps, o un fit polinomiale calibrato su quel
-       range). Qui usiamo np.sqrt in chiaro: e' un segnaposto esplicito,
-       da sostituire in Fase 3D insieme al dimensionamento della
-       profondita' moltiplicativa (lo schema MILP di Aurora per il
-       bootstrap placement dovra' includere anche il costo di questa
-       approssimazione, non solo quello di PolyAct).
+    4. 1/sqrt(var+eps): approssimato con Newton-Raphson. Due schemi di
+       inizializzazione disponibili, mutuamente esclusivi (priorita' a
+       Chebyshev se entrambi forniti per lo stesso layer):
+
+       (a) SCHEMA ORIGINALE -- isqrt_y0 (scalare fisso per layer,
+           calibrato sul massimo osservato) + isqrt_n_iter. Vedi
+           crypto/simulate_newton_raphson_isqrt_v2.py.
+
+       (b) SCHEMA CHEBYSHEV -- isqrt_cheb_coeffs + isqrt_cheb_domain
+           (un polinomio di Chebyshev, diverso per layer, che approssima
+           1/sqrt(x) sull'intero range calibrato) usato per calcolare un
+           punto di partenza y0 GIA' VICINO al valore vero per OGNI
+           valore di varianza, non solo per il caso peggiore -- seguito
+           da isqrt_cheb_post_iter iterazioni di Newton-Raphson
+           (tipicamente 0-2, molte meno delle 4-9 richieste dallo schema
+           (a)). Vedi crypto/simulate_chebyshev_init_isqrt.py per la
+           derivazione: riduce la profondita' totale della
+           normalizzazione del ~58% rispetto allo schema (a), sulla rete
+           aggressiva+sum. Ispirato da CryptoInvSqrt (PP-STAT, arXiv:
+           2508.12093): l'idea e' identica (Chebyshev SOLO per
+           l'inizializzazione, Newton-Raphson per la convergenza finale),
+           adattata qui al caso per-layer della nostra rete invece che a
+           un singolo range fisso.
+
+           ATTENZIONE: il polinomio di Chebyshev estrapola molto male
+           fuori dal range di calibrazione (isqrt_cheb_domain) -- var_eps
+           viene quindi CLIPPATO in quel range solo per il calcolo di
+           y0_cheb (non per l'iterazione Newton-Raphson successiva, che
+           lavora sempre sul valore vero) -- stesso clip gia' applicato
+           in fase di simulazione/calibrazione
+           (crypto/simulate_chebyshev_init_isqrt.py). Senza questo clip,
+           un paziente con varianza leggermente fuori dal range calibrato
+           produce un y0 sbagliato, senza che le iterazioni di rifinitura
+           (spesso 0 per i layer dove il polinomio da solo bastava)
+           abbiano modo di correggerlo -- bug osservato empiricamente in
+           crypto/packing_match_test.py (2 pazienti su 3 in mismatch,
+           risolto aggiungendo questo clip).
+
+       Se ne' (a) ne' (b) sono forniti, ricade su np.sqrt esatto (solo
+       per test con pesi sintetici, vedi test_packing.py).
 
     Args:
         x: (C, H, W) -- feature map della SINGOLA istanza (un paziente)
@@ -308,6 +434,10 @@ def instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w, eps=1e-5):
            invariati rispetto alla versione a statistiche di popolazione)
         n_tiles_h, n_tiles_w: STESSA griglia fissa usata nel resto della rete
         eps: costante di stabilita' numerica
+        isqrt_y0, isqrt_n_iter: schema (a), vedi sopra
+        isqrt_cheb_coeffs, isqrt_cheb_domain, isqrt_cheb_post_iter: schema
+           (b), vedi sopra -- tutti e tre richiesti insieme se si usa
+           questo schema
 
     Returns:
         (C, H, W), normalizzato con statistiche calcolate su x stesso
@@ -336,9 +466,28 @@ def instance_norm_per_instance(x, gamma, beta, n_tiles_h, n_tiles_w, eps=1e-5):
         mean = sum_x / n_pixels
         mean_sq = sum_x2 / n_pixels
         var = mean_sq - mean * mean  # Passo 3
+        var_eps = var + eps
 
-        # Passo 4: NON ancora HE-nativo, vedi docstring.
-        inv_std = 1.0 / np.sqrt(var + eps)
+        # Passo 4: Newton-Raphson, con inizializzazione (a) o (b) -- vedi
+        # docstring. Priorita' a Chebyshev se entrambi gli schemi sono
+        # forniti per lo stesso layer.
+        if isqrt_cheb_coeffs is not None:
+            # Schema (b): Chebyshev per l'inizializzazione, poche iterazioni
+            # di rifinitura. y0 calcolato su var_eps CLIPPATO nel range di
+            # calibrazione (il polinomio estrapola male fuori da li'); le
+            # iterazioni Newton-Raphson successive lavorano invece sul
+            # valore VERO di var_eps, non su quello clippato.
+            var_eps_for_y0 = np.clip(var_eps, isqrt_cheb_domain[0], isqrt_cheb_domain[1])
+            y0_cheb = evaluate_chebyshev_poly(var_eps_for_y0, isqrt_cheb_coeffs, isqrt_cheb_domain)
+            y0_cheb = max(float(y0_cheb), 1e-6)  # sicurezza: mai negativo/zero
+            inv_std = float(newton_raphson_isqrt(np.array(var_eps), y0_cheb, isqrt_cheb_post_iter))
+        elif isqrt_y0 is not None:
+            # Schema (a): y0 scalare fisso per layer
+            inv_std = float(newton_raphson_isqrt(np.array(var_eps), isqrt_y0, isqrt_n_iter))
+        else:
+            # Nessuna approssimazione richiesta: sqrt esatto (solo per test
+            # con pesi sintetici, vedi test_packing.py)
+            inv_std = 1.0 / np.sqrt(var_eps)
 
         out[c] = gamma[c] * (x[c] - mean) * inv_std + beta[c]
 

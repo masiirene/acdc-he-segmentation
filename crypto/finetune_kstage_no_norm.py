@@ -1,13 +1,10 @@
 """
-crypto/finetune_5stage_warmstart.py
+crypto/finetune_kstage_no_norm.py
 
-Fine-tuning VERO (non solo il pre-finetuning gia' visto) del checkpoint
-a 5 stage con warm-start diretto (crypto/removed_enc5_warmstart.pth,
-Dice pre-finetuning 0.43). A differenza del training da zero appena
-fatto (Dice 0.5947 dopo 150 epoche), qui si parte da pesi gia' sensati
-(trapiantati dal checkpoint a 6 stage) -- stesso principio che ha reso
-il pruning di larghezza cosi' efficace rispetto al training da zero
-(0.846 vs 0.594 a parita' di larghezza ridotta).
+Fine-tuning di un UNetKStage con alcuni layer InstanceNorm rimossi
+strutturalmente e permanentemente (bypass a identita', sia in training
+che in eval) -- generalizzazione di finetune_without_6_instancenorm.py
+per le reti a profondita' ridotta (k=5,4,3).
 """
 
 import os
@@ -19,9 +16,13 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, '.')
-from crypto.remove_enc5_stage import UNet5Stage  # riusa la classe gia' definita
+from crypto.remove_deep_stages import UNetKStage
 from training.dataset import ACDCDataset, load_splits
 from training.train import DiceCELoss, dice_score
+
+
+def identity_bypass_hook(module, inputs, output):
+    return inputs[0]
 
 
 def evaluate_dice(model, val_loader, device):
@@ -46,17 +47,25 @@ def evaluate_dice(model, val_loader, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', default='crypto/removed_enc5_warmstart.pth')
-    parser.add_argument('--filters', type=int, nargs=5, default=[32, 64, 128, 256, 128])
-    parser.add_argument('--data_dir', required=True)
-    parser.add_argument('--splits_path', required=True)
+    parser.add_argument('--checkpoint', required=True,
+                        help='Checkpoint sorgente GIA\' allenato con warm-start (es. test_5stage_warmstart_finetuned)')
+    parser.add_argument('--k', type=int, required=True, choices=[3, 4, 5])
+    parser.add_argument('--filters', type=int, nargs='+', required=True)
+    parser.add_argument('--bypass_layers', type=str, required=True,
+                        help='Lista separata da virgola dei layer da bypassare permanentemente')
+    parser.add_argument('--data_dir', default=os.path.expanduser('~/Desktop/tesi_acdc/training'))
+    parser.add_argument('--splits_path', default=os.path.expanduser('~/Desktop/tesi_acdc/splits_final.json'))
     parser.add_argument('--fold', type=int, default=0)
     parser.add_argument('--clamp_values_json', default='crypto/calibrated_clamp_values.json')
     parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--lr', type=float, default=1e-5)  # basso, coerente col fine-tuning (non training da zero)
-    parser.add_argument('--epochs', type=int, default=150)
-    parser.add_argument('--out_dir', default='results/test_5stage_warmstart_finetuned')
+    parser.add_argument('--lr', type=float, default=1e-5)
+    parser.add_argument('--weight_decay', type=float, default=1e-3)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--out_dir', required=True)
     args = parser.parse_args()
+
+    assert len(args.filters) == args.k
+    bypass_layers = [l.strip() for l in args.bypass_layers.split(',')]
 
     device = torch.device('mps') if torch.backends.mps.is_available() else \
         (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
@@ -66,13 +75,23 @@ def main():
     with open(args.clamp_values_json) as f:
         clamp_values = json.load(f)
 
-    model = UNet5Stage(args.filters, clamp_values=clamp_values, skip_mode='sum').to(device)
+    model = UNetKStage(args.k, args.filters, clamp_values=clamp_values).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f'Checkpoint warm-start caricato: {args.checkpoint} ({n_params:,} parametri)')
+    print(f'Checkpoint sorgente caricato: {args.checkpoint} (k={args.k})')
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
+    modules_dict = dict(model.named_modules())
+    frozen_param_names = set()
+    for layer_name in bypass_layers:
+        assert layer_name in modules_dict, f"Layer '{layer_name}' non trovato"
+        modules_dict[layer_name].register_forward_hook(identity_bypass_hook)
+        frozen_param_names.add(f'{layer_name}.weight')
+        frozen_param_names.add(f'{layer_name}.bias')
+    print(f'\n{len(bypass_layers)} layer bypassati permanentemente: {bypass_layers}')
+
+    trainable_params = [p for name, p in model.named_parameters()
+                        if name not in frozen_param_names]
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     criterion = DiceCELoss(num_classes=4)
 
     train_cases, val_cases = load_splits(args.splits_path, fold=args.fold)
@@ -81,8 +100,9 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    dice0, _ = evaluate_dice(model, val_loader, device)
-    print(f'Dice PRIMA del fine-tuning (solo warm-start): {dice0:.4f}\n')
+    dice0, n_exploded0 = evaluate_dice(model, val_loader, device)
+    print(f'Dice PRIMA del fine-tuning (layer gia\' bypassati): {dice0:.4f}, '
+          f'batch esplosi: {n_exploded0}\n')
 
     best_dice = dice0
     best_path = os.path.join(args.out_dir, 'best_model.pth')
@@ -117,7 +137,8 @@ def main():
         print(f'Epoch {epoch:3d} | loss {avg_loss:.4f} | val_dice {val_dice:.4f} | '
               f'batch esplosi {n_exploded} | {dt:.1f}s{marker}')
 
-    print(f'\nBest Dice (5 stage, warm-start + fine-tuning): {best_dice:.4f}')
+    print(f'\nFine-tuning completato. Best Dice: {best_dice:.4f}')
+    print(f'Checkpoint migliore: {best_path}')
 
 
 if __name__ == '__main__':

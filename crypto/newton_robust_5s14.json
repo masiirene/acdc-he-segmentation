@@ -1,0 +1,30 @@
+{
+  "dec0.block.4": {
+    "y0": 0.12884072712271993,
+    "iterations_needed": 10
+  },
+  "dec1.block.1": {
+    "y0": 0.3834859445837131,
+    "iterations_needed": 7
+  },
+  "dec1.block.4": {
+    "y0": 0.237457496591399,
+    "iterations_needed": 8
+  },
+  "enc0.block.1": {
+    "y0": 0.5071103088402252,
+    "iterations_needed": 10
+  },
+  "enc0.block.4": {
+    "y0": 0.14725468569826786,
+    "iterations_needed": 7
+  },
+  "enc1.block.1": {
+    "y0": 0.20338395099691653,
+    "iterations_needed": 8
+  },
+  "enc2.block.1": {
+    "y0": 0.2709342586159761,
+    "iterations_needed": 7
+  }
+}

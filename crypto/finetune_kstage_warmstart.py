@@ -1,13 +1,7 @@
 """
-crypto/finetune_5stage_warmstart.py
+crypto/finetune_kstage_warmstart.py
 
-Fine-tuning VERO (non solo il pre-finetuning gia' visto) del checkpoint
-a 5 stage con warm-start diretto (crypto/removed_enc5_warmstart.pth,
-Dice pre-finetuning 0.43). A differenza del training da zero appena
-fatto (Dice 0.5947 dopo 150 epoche), qui si parte da pesi gia' sensati
-(trapiantati dal checkpoint a 6 stage) -- stesso principio che ha reso
-il pruning di larghezza cosi' efficace rispetto al training da zero
-(0.846 vs 0.594 a parita' di larghezza ridotta).
+Generalizzazione di finetune_5stage_warmstart.py per k=5,4,3.
 """
 
 import os
@@ -19,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, '.')
-from crypto.remove_enc5_stage import UNet5Stage  # riusa la classe gia' definita
+from crypto.remove_deep_stages import UNetKStage
 from training.dataset import ACDCDataset, load_splits
 from training.train import DiceCELoss, dice_score
 
@@ -46,17 +40,20 @@ def evaluate_dice(model, val_loader, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', default='crypto/removed_enc5_warmstart.pth')
-    parser.add_argument('--filters', type=int, nargs=5, default=[32, 64, 128, 256, 128])
+    parser.add_argument('--checkpoint', required=True, help='Checkpoint warm-start (da remove_deep_stages.py)')
+    parser.add_argument('--k', type=int, required=True, choices=[3, 4, 5])
+    parser.add_argument('--filters', type=int, nargs='+', required=True)
     parser.add_argument('--data_dir', required=True)
     parser.add_argument('--splits_path', required=True)
     parser.add_argument('--fold', type=int, default=0)
     parser.add_argument('--clamp_values_json', default='crypto/calibrated_clamp_values.json')
     parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--lr', type=float, default=1e-5)  # basso, coerente col fine-tuning (non training da zero)
-    parser.add_argument('--epochs', type=int, default=150)
-    parser.add_argument('--out_dir', default='results/test_5stage_warmstart_finetuned')
+    parser.add_argument('--lr', type=float, default=1e-5)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--out_dir', required=True)
     args = parser.parse_args()
+
+    assert len(args.filters) == args.k
 
     device = torch.device('mps') if torch.backends.mps.is_available() else \
         (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
@@ -66,7 +63,7 @@ def main():
     with open(args.clamp_values_json) as f:
         clamp_values = json.load(f)
 
-    model = UNet5Stage(args.filters, clamp_values=clamp_values, skip_mode='sum').to(device)
+    model = UNetKStage(args.k, args.filters, clamp_values=clamp_values).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state)
     n_params = sum(p.numel() for p in model.parameters())
@@ -117,7 +114,7 @@ def main():
         print(f'Epoch {epoch:3d} | loss {avg_loss:.4f} | val_dice {val_dice:.4f} | '
               f'batch esplosi {n_exploded} | {dt:.1f}s{marker}')
 
-    print(f'\nBest Dice (5 stage, warm-start + fine-tuning): {best_dice:.4f}')
+    print(f'\nBest Dice (k={args.k}, warm-start + fine-tuning): {best_dice:.4f}')
 
 
 if __name__ == '__main__':
