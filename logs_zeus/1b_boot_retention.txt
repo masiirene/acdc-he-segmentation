@@ -1,0 +1,31 @@
+=== SONDA 1b: le uscite del bootstrap trattengono memoria dopo Offload? ===
+  Bootstrap setup+keygen (bsgsDim=[8, 8]): 10.9s
+  chiavi di rotazione extra: 23
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 40 ~ 14160MB
+  LoadContext: 34.4s
+  cache: ciphertext 6.0 GiB, rotazioni 6.0 GiB, blocco conv B=8
+
+  ciphertext d'ingresso a livello 1; memoria GPU all'inizio: 14159 MiB
+
+  riscaldamento (un bootstrap, non contato) ...
+  memoria GPU dopo il riscaldamento: 28587 MiB
+
+  R1  tre lotti di bootstrap, uscite tenute vive (Offload + Trim)
+      lotto 1: 28587 -> 30603 MiB     126.0 MiB per ciphertext
+      lotto 2: 30603 -> 31627 MiB      64.0 MiB per ciphertext
+      lotto 3: 31627 -> 32651 MiB      64.0 MiB per ciphertext
+
+  R2  eliminazione delle uscite tenute ...
+      32651 -> 32651 MiB   restituiti 0 MiB su 4064 cresciuti
+
+  R3  16 bootstrap con lavaggio EvalAdd(., 0.0), si tiene solo il risultato
+      32651 -> 35723 MiB     192.0 MiB per ciphertext
+
+=== LETTURA ===
+  - ANDAMENTO MISTO per lotto: [126, 64, 64] MiB per ciphertext: da guardare nei numeri.
+  - eliminando le uscite si recupera il 0% della crescita: la parte rimasta e' una cache o un'area di lavoro che non si libera con i ciphertext.
+  - il lavaggio NON aiuta (192 MiB per ciphertext).

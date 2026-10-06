@@ -1,0 +1,30 @@
+=== RETE IN HE: crypto/pack_narrow.npz ===
+  k=5, filtri [4, 8, 16, 32, 16], norm bypassate 4 (dec0.block.1,enc4.block.1,dec2.block.4,enc3.block.1)
+  immagine 256x224, N=65536 slot, 5 livelli del reticolo; modo 'narrow', fetta 1 (val)
+  costo stimato per stadio (livelli): [35, 22, 38, 22, 22, 22, 6, 35, 6, 32, 22, 22, 22, 6, 19, 22, 6, 38]
+  opzioni: MASK_LAUNDER=0 MARGIN=1 CONV_B=8 CHECK=1 STOP_AFTER=
+    [GPU] inizio: 12152 MiB
+  Bootstrap setup+keygen (bsgsDim=[8, 8]): 10.8s
+  chiavi di rotazione extra: 51 (4.8s)
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 68 ~ 24072MB
+  LoadContext: 48.2s
+  cache: ciphertext 3.0 GiB, rotazioni 6.0 GiB
+    [GPU] dopo LoadContext: 16225 MiB
+
+Convenzione dei coefficienti di Chebyshev ...
+  prova convenzione: c0 x 1 (post_iter 0): errore 2.52e+00
+  prova convenzione: c0 x 2 (post_iter 0): errore 3.28e+00
+Traceback (most recent call last):
+  File "/home/masi/acdc-he-segmentation/crypto/run_he_network_zeus.py", line 136, in <module>
+    main()
+  File "/home/masi/acdc-he-segmentation/crypto/run_he_network_zeus.py", line 132, in main
+    runner.run()
+  File "/home/masi/acdc-he-segmentation/crypto/he_network.py", line 474, in run
+    self.detect_cheb_convention()
+  File "/home/masi/acdc-he-segmentation/crypto/he_network.py", line 335, in detect_cheb_convention
+    raise RuntimeError(f"nessuna convenzione dei coefficienti riproduce il polinomio (errore {best[0]:.2e}): "
+RuntimeError: nessuna convenzione dei coefficienti riproduce il polinomio (errore 2.52e+00): guardare isqrt_chebyshev_fhe

@@ -72,12 +72,156 @@ def get_scheme(meta, name):
     return ("newton", float(e["y0"]), int(e["n"]))
 
 
+# La libreria reale (PyFIDESlib/FIDESlib, basata su OpenFHE) valuta correttamente EvalChebyshevSeries per polinomi di grado
+# >= 3, con la convenzione OpenFHE (c0/2): batteria di diagnosi del 5 ott, errori ~1e-11 per i gradi 3, 4 e 15. Per i gradi
+# 1 e 2 il risultato e' SBAGLIATO e per un polinomio costante lancia un'eccezione. Riempire con zeri NON basta: la prova su
+# Zeus ha dato gli stessi identici errori con e senza zeri, perche' gli zeri finali vengono scartati prima di scegliere il
+# percorso. Si riempie quindi con un coefficiente piccolissimo ma NON nullo (1e-12 su T3 e T4: cambia il polinomio di meno
+# di 2e-12, molto sotto il rumore di CKKS) per passare dal percorso che funziona.
+CHEB_MIN_COEFS = 5
+CHEB_PAD_EPS = 1e-12
+
+
+def pad_cheb(coef):
+    coef = list(coef)
+    d = max((i for i, c in enumerate(coef) if c != 0.0), default=0)      # grado effettivo (zeri finali scartati)
+    if d >= CHEB_MIN_COEFS - 1:
+        return coef[:d + 1]
+    return coef[:d + 1] + [CHEB_PAD_EPS] * (CHEB_MIN_COEFS - (d + 1))
+
+
 def stage_cost(scheme):
     if scheme is None:
         return S_NONORM
     if scheme[0] == "cheb":
-        return 11 + 3 * scheme[3] + (len(scheme[1]) - 1)
+        return 11 + 3 * scheme[3] + (max(len(scheme[1]), CHEB_MIN_COEFS) - 1)
     return 11 + 3 * scheme[2]
+
+
+# ============================================================
+# Pool di memoria della libreria (strumenti scoperti il 5 ott leggendo l'interfaccia di PyFIDESlib)
+# ============================================================
+# Dai commenti di src/bindings.cpp: Ciphertext.Offload() restituisce i limb a un pool INTERNO di FIDESlib (nvidia-smi non
+# scende finche' non si chiama TrimGPUMemoryPool) e il Trim restituisce solo SLAB INTERI inattivi. La libreria espone anche
+# un pool di polinomi ausiliari (GetAuxiliaryPolyPoolSize / ClearAuxiliaryPolyPool) e GetGPUMemoryPoolStats.
+
+class PoolCC:
+    """Involucro del CryptoContext: delega tutto. Ogni TrimGPUMemoryPool() e' preceduto da Synchronize() (sync=True, il
+    predefinito): le liberazioni di memoria della libreria sono ordinate per stream CUDA e il Trim non puo' restituire quelle
+    ancora in attesa. Con aux_clear=True si chiama anche ClearAuxiliaryPolyPool() (nella prova del 5 ott il pool ausiliario
+    risultava sempre vuoto). Un errore nelle chiamate non e' silenzioso: resta in .errors e si stampa con pool_info()."""
+
+    def __init__(self, cc, aux_clear=False, sync=True):
+        object.__setattr__(self, "_cc", cc)
+        object.__setattr__(self, "_aux", bool(aux_clear))
+        object.__setattr__(self, "_sync", bool(sync))
+        object.__setattr__(self, "errors", {})
+
+    def __getattr__(self, name):
+        return getattr(self._cc, name)
+
+    def TrimGPUMemoryPool(self):
+        names = (("Synchronize",) if self._sync else ()) + (("ClearAuxiliaryPolyPool",) if self._aux else ())
+        for nm in names:
+            fn = getattr(self._cc, nm, None)
+            if fn is None:
+                self.errors[nm] = "metodo assente"
+                continue
+            try:
+                fn()
+            except Exception as e:                         # noqa: BLE001
+                self.errors[nm] = f"{type(e).__name__}: {str(e)[:60]}"
+        return self._cc.TrimGPUMemoryPool()
+
+
+def _evict_ct(self):
+    """Svuota la cache dei ciphertext: OffloadCiphertexts() + Synchronize + Trim. Restituisce (MiB prima, MiB dopo) dei byte
+    residenti della cache, oppure None se la libreria non offre la funzione. Perche': il 5 ott, sulla rete vera, i byte
+    residenti della cache dei ciphertext sono saliti a 7680 MiB contro un limite impostato di 3072 (il limite e' morbido)."""
+    inner = self._cc
+    res = getattr(inner, "GetCiphertextCacheResidentBytes", None)
+    fn = getattr(inner, "OffloadCiphertexts", None)
+    if fn is None:
+        self.errors["OffloadCiphertexts"] = "metodo assente"
+        return None
+    try:
+        before = res() / 1048576 if res else float("nan")
+        fn()
+        self.TrimGPUMemoryPool()
+        after = res() / 1048576 if res else float("nan")
+        return before, after
+    except Exception as e:                                 # noqa: BLE001
+        self.errors["OffloadCiphertexts"] = f"{type(e).__name__}: {str(e)[:60]}"
+        return None
+
+
+PoolCC.evict_ct = _evict_ct
+
+
+def _fmt_stats(st):
+    """GetGPUMemoryPoolStats() restituisce un dizionario (device, cuda_free_bytes, cuda_total_bytes, buckets [...]):
+    le grandezze in byte si stampano in MiB."""
+    def conv(k, v):
+        return f"{k}={v / 1048576:.0f}MiB" if isinstance(v, (int, float)) and str(k).endswith("bytes") else f"{k}={v}"
+    if isinstance(st, dict):
+        top = [conv(k, v) for k, v in st.items() if k not in ("buckets", "device", "cuda_total_bytes")]
+        bk = ["{" + ",".join(conv(k, v) for k, v in x.items()) + "}" if isinstance(x, dict) else str(x)
+              for x in (st.get("buckets") or [])]
+        return " ".join(top) + " buckets[" + ";".join(bk) + "]"
+    return " ".join(str(st).split())
+
+
+def pool_info(cc, full=False):
+    """Stringa con la dimensione del pool ausiliario e le statistiche del pool GPU della libreria."""
+    parts = []
+    inner = getattr(cc, "_cc", cc)
+    fn = getattr(inner, "GetAuxiliaryPolyPoolSize", None)
+    if fn is not None:
+        try:
+            parts.append(f"aux {fn()}")
+        except Exception as e:                             # noqa: BLE001
+            parts.append(f"aux ERR {type(e).__name__}")
+    try:
+        import fideslib_py as f
+        g = getattr(f, "GetGPUMemoryPoolStats", None)
+        if g is not None:
+            st = None
+            for args in ((), (inner,)):
+                try:
+                    st = g(*args)
+                    break
+                except TypeError:
+                    continue
+            if st is not None:
+                txt = _fmt_stats(st)
+                parts.append("pool " + (txt if full else txt[:600]))
+    except Exception:                                      # noqa: BLE001
+        pass
+    fn = getattr(inner, "GetDeviceObjectCounts", None)
+    if fn is not None:
+        try:
+            oc = fn()
+            parts.append("oggetti sul dispositivo " + " ".join(f"{k}={v}" for k, v in dict(oc).items()))
+        except Exception as e:                             # noqa: BLE001
+            parts.append(f"oggetti ERR {type(e).__name__}")
+    ch = []
+    for tag, nm in (("rot", "GetRotationKeyCacheResidentBytes"), ("ct", "GetCiphertextCacheResidentBytes"),
+                    ("pt", "GetPlaintextCacheResidentBytes"), ("bs", "GetBootstrapCacheResidentBytes"),
+                    ("bs_caricati", "GetBootstrapCacheLoadedBytes")):
+        fn = getattr(inner, nm, None)
+        if fn is None:
+            continue
+        try:
+            v = fn()
+            ch.append(f"{tag}={v / 1048576:.0f}MiB" if isinstance(v, (int, float)) else f"{tag}={v}")
+        except Exception as e:                             # noqa: BLE001
+            ch.append(f"{tag}=ERR({type(e).__name__})")
+    if ch:
+        parts.append("cache residenti " + " ".join(ch))
+    errs = getattr(cc, "errors", None)
+    if errs:
+        parts.append("ERRORI: " + "; ".join(f"{k}: {v}" for k, v in errs.items()))
+    return " | ".join(parts)
 
 
 # ============================================================
@@ -253,12 +397,14 @@ def he_conv1x1(he, chans, w, b):
 # ============================================================
 
 class HERunner:
-    def __init__(self, he, pack, log=print, mem=None, margin=1, conv_b=8, check=False, stop_after=None):
+    def __init__(self, he, pack, log=print, mem=None, margin=1, conv_b=8, check=False, stop_after=None, mem_guard=0, evict_ct=False):
         self.he, self.cc, self.g = he, he.cc, he.g
         self.pack, self.W, self.meta = pack, pack["W"], pack["meta"]
         self.log = log
         self.mem = mem or (lambda: -1)
         self.margin, self.conv_b, self.check, self.stop_after = margin, conv_b, check, stop_after
+        self.evict_ct = evict_ct             # svuota la cache dei ciphertext dopo la convoluzione e a fine passo
+        self.mem_guard = mem_guard           # MiB: se la memoria GPU supera il limite dopo un passo, si ferma e stampa il resoconto
         self.nb = dict(entrata=0, newton=0, inversa=0, altro=0)
         self.max_level = 0
         self.mem_peak = 0
@@ -269,6 +415,13 @@ class HERunner:
         self.first_stage = True
         self.t_conv_tot = 0.0
         self.t_norm_tot = 0.0
+
+    def _evict(self, tag):
+        if not self.evict_ct or not hasattr(self.cc, "evict_ct"):
+            return
+        r = self.cc.evict_ct()
+        if r is not None:
+            self.log(f"{'':<14}svuotamento cache ciphertext ({tag}): {r[0]:.0f} -> {r[1]:.0f} MiB")
 
     # ---------- livelli e bootstrap ----------
     def _note(self, ct):
@@ -312,13 +465,17 @@ class HERunner:
             return
         _, coef, dom, _n = scheme
         v = np.linspace(dom[0], dom[1], 2048)
-        vec = np.zeros(self.g.N)
-        vec[:v.size] = v
+        # TUTTI gli slot devono stare nel dominio del polinomio: con slot a zero (fuori dominio) T_k cresce come
+        # (|t| + sqrt(t^2 - 1))^k e puo' superare la capacita' del modulo CKKS, rovinando TUTTI gli slot (il messaggio
+        # si riduce modulo q sui coefficienti, che mescolano gli slot). Nella rete vera la varianza e' la stessa in ogni slot.
+        vec = np.tile(v, -(-self.g.N // v.size))[:self.g.N]
+        self.log(f"  dominio del polinomio [{dom[0]:.4g}, {dom[1]:.4g}], grado {len(coef) - 1} (riempito a grado "
+                 f"{max(len(coef), CHEB_MIN_COEFS) - 1}), tutti gli slot in dominio")
         ct = self.he.enc(vec)
         exp0 = C.Chebyshev(coef, domain=dom)(v)
         best = None
         for factor in (1.0, 2.0):
-            coef_he = [coef[0] * factor] + list(coef[1:])
+            coef_he = pad_cheb([coef[0] * factor] + list(coef[1:]))
             post0 = True
             try:
                 y = isqrt_chebyshev_fhe(self.cc, ct, coef_he, list(dom), 0)
@@ -332,10 +489,34 @@ class HERunner:
             if best is None or err < best[0]:
                 best = (err, factor, post0)
         if best[0] > 1e-2:
+            self.cheb_battery()
             raise RuntimeError(f"nessuna convenzione dei coefficienti riproduce il polinomio (errore {best[0]:.2e}): "
                                f"guardare isqrt_chebyshev_fhe")
         self.c0_factor, self.cheb_post0 = best[1], best[2]
         self.log(f"  convenzione scelta: c0 x {best[1]:g}, post_iter=0 {'supportato' if best[2] else 'NON supportato (si usa 1)'}")
+
+    def cheb_battery(self):
+        """Se nessuna convenzione riproduce il polinomio: si interroga EvalChebyshevSeries direttamente su polinomi
+        noti (coefficienti scelti a mano, input in [-1, 1] in tutti gli slot) per vedere cosa calcola davvero."""
+        cc = self.cc
+        n = 2048
+        t = np.linspace(-1.0, 1.0, n)
+        ct = self.he.enc(np.tile(t, -(-self.g.N // n))[:self.g.N])
+        self.log("  BATTERIA DI DIAGNOSI di EvalChebyshevSeries (input t in [-1, 1], tutti gli slot):")
+        casi = [("T1:  [0, 1]", [0.0, 1.0]), ("T2:  [0, 0, 1]", [0.0, 0.0, 1.0]), ("T3:  [0, 0, 0, 1]", [0.0, 0.0, 0.0, 1.0]),
+                ("costante: [1, 0, 0]", [1.0, 0.0, 0.0]), ("misto grado 4", [0.5, 0.3, -0.2, 0.1, 0.05]),
+                ("misto grado 15", [0.4 / (1 + k) * (-1) ** k for k in range(16)])]
+        for nome, co in casi:
+            try:
+                got = self.he.dec(cc.EvalChebyshevSeries(ct, list(co), -1.0, 1.0))[:n]
+            except Exception as e:
+                self.log(f"    {nome:<22} ECCEZIONE {type(e).__name__}: {str(e)[:100]}")
+                continue
+            co_b = [co[0] / 2.0] + list(co[1:])
+            ea = float(np.max(np.abs(got - C.chebval(t, co))))
+            eb = float(np.max(np.abs(got - C.chebval(t, co_b))))
+            self.log(f"    {nome:<22} errore se c0 pieno: {ea:.2e} | se c0/2 (OpenFHE): {eb:.2e} | "
+                     f"valori {got[0]:+.3f} .. {got[n // 2]:+.3f} .. {got[-1]:+.3f}")
 
     # ---------- radice inversa ----------
     def isqrt(self, var, scheme):
@@ -344,7 +525,7 @@ class HERunner:
         vh = cc.EvalMult(var, -0.5)
         if scheme[0] == "cheb":
             _, coef, dom, n = scheme
-            coef_he = [coef[0] * self.c0_factor] + list(coef[1:])
+            coef_he = pad_cheb([coef[0] * self.c0_factor] + list(coef[1:]))
             if self.cheb_post0:
                 y, done = isqrt_chebyshev_fhe(cc, var, coef_he, list(dom), 0), 0
             else:
@@ -400,6 +581,7 @@ class HERunner:
                                   st["stride2"], B=self.conv_b)
         he.dec(conv[-1])
         t_conv = time.time() - t0
+        self._evict("dopo conv")
         mask = he.mask_pt(out_level)
         Hh, Ww = g.size(out_level)
         pa = tuple(scalar(W, st["poly"] + s) for s in (".a", ".b", ".c"))
@@ -418,17 +600,19 @@ class HERunner:
         cc.TrimGPUMemoryPool()
         vec0 = he.dec(outs[0])
         t_norm = time.time() - t0
+        self._evict("fine stadio")
         self.t_conv_tot += t_conv
         self.t_norm_tot += t_norm
         self._sample_mem()
         name = f"{st['block']}.{st['which']}"
         row = dict(name=name, kind=("senza norm" if scheme is None else scheme[0]), cin=st["cin"], cout=st["cout"],
                    lvl_in=lvl_in, lvl_out=max(c.GetLevel() for c in outs),
-                   boots={k: self.nb[k] - nb0[k] for k in self.nb}, t_conv=t_conv, t_norm=t_norm, mem=self.mem(), err=None)
+                   boots={k: self.nb[k] - nb0[k] for k in self.nb}, t_conv=t_conv, t_norm=t_norm, mem=self.mem(), err=None, scale=None)
         if self.check:
             ref = self.pack["ref"].get(st["poly"])
             if ref is not None:
                 row["err"] = float(np.abs(g.unpack(vec0, out_level) - ref[0]).max())
+                row["scale"] = float(np.abs(ref[0]).max())
         self.rows.append(row)
         self._log_row(row)
         return outs
@@ -443,6 +627,7 @@ class HERunner:
         out = he_add(he, up, self.skips[st["j"]])
         he.dec(out[0])
         t = time.time() - t0
+        self._evict("fine up")
         self._sample_mem()
         row = dict(name=f"up{st['j']}+skip", kind="upsampling", cin=st["cin"], cout=st["cout"], lvl_in=lvl_in,
                    lvl_out=max(c.GetLevel() for c in out), boots={k: self.nb[k] - nb0[k] for k in self.nb},
@@ -461,10 +646,15 @@ class HERunner:
 
     def _log_row(self, r):
         b = r["boots"]
-        err = "" if r["err"] is None else f" | errore canale 0 {r['err']:.2e}"
+        err = "" if r["err"] is None else (f" | errore canale 0 {r['err']:.2e}" + (
+            "" if not r.get("scale") else f" (scala {r['scale']:.3g}, relativo {r['err'] / r['scale']:.1e})"))
         self.log(f"  {r['name']:<12}{r['kind']:<11}{r['cin']:>4}->{r['cout']:<4} livelli {r['lvl_in']:>2}->{r['lvl_out']:<2} | "
-                 f"bootstrap ingresso {b['entrata']:>4} newton {b['newton']:>4} inversa {b['inversa']:>4} altro {b['altro']:>3} | "
+                 f"bootstrap ingresso {b['entrata']:>4} newton {b['newton']:>4} inversa {b['inversa']:>4} altro {b['altro']:>3} "
+                 f"(cumulati {sum(self.nb.values())}) | "
                  f"conv {r['t_conv']:7.1f}s norm {r['t_norm']:7.1f}s | GPU {r['mem']} MiB{err}")
+        pi = pool_info(self.cc)
+        if pi:
+            self.log(f"{'':<14}[{pi}]")
 
     # ---------- esecuzione ----------
     def run(self):
@@ -489,6 +679,10 @@ class HERunner:
                 chans = self.run_up(chans, st)
             else:
                 logits = self.run_out(chans)
+            if self.mem_guard and self.mem() > self.mem_guard:
+                self.log(f"\n  ARRESTO DI SICUREZZA: memoria GPU {self.mem()} MiB oltre il limite {self.mem_guard} MiB "
+                         f"(MEM_GUARD_MIB): si ferma qui invece di andare fuori memoria. Resoconto parziale sotto.")
+                break
         self.t_total = time.time() - t_start
         return self.report(logits)
 
@@ -501,6 +695,9 @@ class HERunner:
         L(f"  bootstrap totali: {n_boot}  (ingresso agli stadi {self.nb['entrata']}, dentro la radice inversa "
           f"{self.nb['newton']}, su inv_std {self.nb['inversa']}, altro {self.nb['altro']})")
         L(f"  livello massimo raggiunto: {self.max_level} (limite {DEPTH}); picco memoria GPU: {self.mem_peak} MiB")
+        pi = pool_info(self.cc, full=True)
+        if pi:
+            L(f"  pool della libreria alla fine: {pi}")
         res = dict(n_boot=n_boot, max_level=self.max_level, mem_peak=self.mem_peak, t_total=self.t_total)
         if logits is None:
             return res

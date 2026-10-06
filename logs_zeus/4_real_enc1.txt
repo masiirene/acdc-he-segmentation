@@ -1,0 +1,31 @@
+=== RETE IN HE: crypto/pack_5s14.npz ===
+  k=5, filtri [32, 64, 128, 256, 128], norm bypassate 4 (dec0.block.1,enc4.block.1,dec2.block.4,enc3.block.1)
+  immagine 256x224, N=65536 slot, 5 livelli del reticolo; modo 'real', fetta 1 (val)
+  costo stimato per stadio (livelli): [41, 32, 35, 24, 32, 27, 6, 24, 6, 27, 24, 27, 27, 6, 32, 35, 6, 41]
+  opzioni: MASK_LAUNDER=0 MARGIN=1 CONV_B=8 CHECK=1 STOP_AFTER=enc1 TRIM_SYNC=1 AUX_CLEAR=0
+    [GPU] inizio: 12154 MiB
+  Bootstrap setup+keygen (bsgsDim=[8, 8]): 10.5s
+  chiavi di rotazione extra: 51 (4.9s)
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 68 ~ 24072MB
+  LoadContext: 51.5s
+  cache: ciphertext 3.0 GiB, rotazioni 6.0 GiB
+    [GPU] dopo LoadContext: 16225 MiB
+    pool: aux 0 | pool cuda_free_bytes=29265MiB buckets[{chunk_bytes=0MiB,slab_count=1,reserved_bytes=1MiB,total_chunks=1024,free_chunks=1020,live_chunks=4};{chunk_bytes=0MiB,slab_count=1,reserved_bytes=8MiB,total_chunks=1024,free_chunks=638,live_chunks=386};{chunk_bytes=1MiB,slab_count=3,reserved_bytes=3072MiB,total_chunks=3072,free_chunks=2718,live_chunks=354}] | TRIM_SYNC=1 AUX_CLEAR=0
+
+Convenzione dei coefficienti di Chebyshev ...
+  dominio del polinomio [0.1699, 5.284], grado 2 (riempito a grado 4), tutti gli slot in dominio
+  prova convenzione: c0 x 1 (post_iter 0): errore 2.89e-01
+  prova convenzione: c0 x 2 (post_iter 0): errore 2.40e-12
+  convenzione scelta: c0 x 2, post_iter=0 supportato
+
+  stadio      schema        canali livelli        bootstrap                                                     tempi                      
+  enc0.1      newton        1->32   livelli  0->36 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 0) | conv     5.6s norm    36.1s | GPU 25501 MiB | errore canale 0 9.40e-11 (scala 11.9, relativo 7.9e-12)
+              [aux 20 | pool cuda_free_bytes=19989MiB buckets[{chunk_bytes=0MiB,slab_count=1,reserved_bytes=1MiB,total_chunks=1024,free_chunks=1020,live_chunks=4};{chunk_bytes=0MiB,slab_count=1,reserved_bytes=8MiB,total_chunks=1024,free_chunks=483,live_chunks=541};{chunk_bytes=1MiB,slab_count=12,reserved_bytes=12288MiB,total_chunks=12288,free_chunks=238,live_chunks=12050}]]
+  enc0.2      newton       32->32   livelli 36->33 | bootstrap ingresso   32 newton   32 inversa    0 altro   0 (cumulati 64) | conv    32.8s norm    82.0s | GPU 37965 MiB | errore canale 0 1.24e-03 (scala 4.47, relativo 2.8e-04)
+              [aux 58 | pool cuda_free_bytes=7525MiB buckets[{chunk_bytes=0MiB,slab_count=1,reserved_bytes=1MiB,total_chunks=1024,free_chunks=1020,live_chunks=4};{chunk_bytes=0MiB,slab_count=1,reserved_bytes=8MiB,total_chunks=1024,free_chunks=381,live_chunks=643};{chunk_bytes=1MiB,slab_count=24,reserved_bytes=24576MiB,total_chunks=24576,free_chunks=5204,live_chunks=19372}]]
+  enc1.1      newton       32->64   livelli 33->36 | bootstrap ingresso   32 newton   64 inversa    0 altro   0 (cumulati 160) | conv    54.5s norm   256.9s | GPU 43933 MiB | errore canale 0 1.14e-03 (scala 8.11, relativo 1.4e-04)
+              [aux 58 | pool cuda_free_bytes=1557MiB buckets[{chunk_bytes=0MiB,slab_count=1,reserved_bytes=1MiB,total_chunks=1024,free_chunks=1020,live_chunks=4};{chunk_bytes=0MiB,slab_count=1,reserved_bytes=8MiB,total_chunks=1024,free_chunks=252,live_chunks=772};{chunk_bytes=1MiB,slab_count=30,reserved_bytes=30720MiB,total_chunks=30720,free_chunks=5076,live_chunks=25644}]]

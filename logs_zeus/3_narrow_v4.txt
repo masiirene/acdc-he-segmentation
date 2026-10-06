@@ -1,0 +1,47 @@
+=== RETE IN HE: crypto/pack_narrow.npz ===
+  k=5, filtri [4, 8, 16, 32, 16], norm bypassate 4 (dec0.block.1,enc4.block.1,dec2.block.4,enc3.block.1)
+  immagine 256x224, N=65536 slot, 5 livelli del reticolo; modo 'narrow', fetta 1 (val)
+  costo stimato per stadio (livelli): [35, 24, 38, 24, 24, 24, 6, 35, 6, 32, 24, 24, 24, 6, 21, 24, 6, 38]
+  opzioni: MASK_LAUNDER=0 MARGIN=1 CONV_B=8 CHECK=1 STOP_AFTER=
+    [GPU] inizio: 12152 MiB
+  Bootstrap setup+keygen (bsgsDim=[8, 8]): 11.6s
+  chiavi di rotazione extra: 51 (5.2s)
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 68 ~ 24072MB
+  LoadContext: 48.0s
+  cache: ciphertext 3.0 GiB, rotazioni 6.0 GiB
+    [GPU] dopo LoadContext: 16401 MiB
+
+Convenzione dei coefficienti di Chebyshev ...
+  dominio del polinomio [0.4295, 7.379], grado 2 (riempito a grado 4), tutti gli slot in dominio
+  prova convenzione: c0 x 1 (post_iter 0): errore 2.53e-01
+  prova convenzione: c0 x 2 (post_iter 0): errore 2.54e-12
+  convenzione scelta: c0 x 2, post_iter=0 supportato
+
+  stadio      schema        canali livelli        bootstrap                                                     tempi                      
+  enc0.1      newton        1->4    livelli  0->30 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 0) | conv     1.4s norm     3.0s | GPU 24653 MiB | errore canale 0 4.25e-10
+  enc0.2      cheb          4->4    livelli 30->29 | bootstrap ingresso    4 newton    0 inversa    4 altro   0 (cumulati 8) | conv     1.5s norm    10.6s | GPU 33869 MiB | errore canale 0 8.75e-03
+  enc1.1      newton        4->8    livelli 29->39 | bootstrap ingresso    4 newton    8 inversa    0 altro   0 (cumulati 20) | conv     3.2s norm    20.6s | GPU 34893 MiB | errore canale 0 1.58e-02
+  enc1.2      cheb          8->8    livelli 39->29 | bootstrap ingresso    8 newton    0 inversa    8 altro   0 (cumulati 36) | conv     3.8s norm    20.2s | GPU 35917 MiB | errore canale 0 1.35e-01
+  enc2.1      cheb          8->16   livelli 29->29 | bootstrap ingresso    8 newton    0 inversa   16 altro   0 (cumulati 60) | conv     5.2s norm    40.0s | GPU 36941 MiB | errore canale 0 7.60e-02
+  enc2.2      cheb         16->16   livelli 29->29 | bootstrap ingresso   16 newton    0 inversa   16 altro   0 (cumulati 92) | conv     9.1s norm    39.4s | GPU 37965 MiB | errore canale 0 4.05e-02
+  enc3.1      senza norm   16->32   livelli 29->34 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 92) | conv     8.0s norm     1.9s | GPU 37965 MiB | errore canale 0 1.75e-01
+  enc3.2      newton       32->32   livelli 34->36 | bootstrap ingresso   32 newton   32 inversa    0 altro   0 (cumulati 156) | conv    47.4s norm   128.8s | GPU 40861 MiB | errore canale 0 1.44e-01
+  enc4.1      senza norm   32->16   livelli 36->41 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 156) | conv     7.8s norm     0.5s | GPU 40861 MiB | errore canale 0 9.40e-02
+  enc4.2      newton       16->16   livelli 41->33 | bootstrap ingresso   16 newton   16 inversa    0 altro   0 (cumulati 188) | conv    13.2s norm    65.6s | GPU 44957 MiB | errore canale 0 1.39e-02
+  up3+skip    upsampling   16->32   livelli 33->36 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 188) | conv    10.2s norm     0.0s | GPU 44957 MiB
+  dec3.1      cheb         32->32   livelli 36->29 | bootstrap ingresso   32 newton    0 inversa   32 altro   0 (cumulati 252) | conv    45.8s norm   130.3s | GPU 44957 MiB | errore canale 0 9.06e-02
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib9GPUmallocEiiP11CUstream_stb+0x29a)[0x78f6cace363a]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib9VectorGPUImEC1ERNS_6StreamEiiPKm+0x6a)[0x78f6cad1ddfa]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib4CKKS4LimbImEC1ERNS0_11ContextDataEiRNS_6StreamEib+0x70)[0x78f6cad39c30]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib4CKKS13LimbPartition8generateERSt6vectorINS_10LimbRecordESaIS3_EERS2_ISt7variantIJNS0_4LimbIjEENS8_ImEEEESaISB_EERNS_9VectorGPUIPvEEiPSH_PmmSK_mb+0xfb6)[0x78f6cacc9a96]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib4CKKS13LimbPartition20generateAllDigitLimbEPmm+0x15e)[0x78f6cacca9ae]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(+0x25ed5b)[0x78f6cac5ed5b]
+/lib/x86_64-linux-gnu/libgomp.so.1(GOMP_parallel+0x47)[0x78f76dcc2977]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib4CKKS7RNSPoly22generateDecompAndDigitEb+0x8e)[0x78f6cac626ae]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib4CKKS15KeySwitchingKey13allocateLimbsEv+0x30)[0x78f6cacb81f0]
+/home/masi/PyFIDESlib/fideslib_py/_core.cpython-312-x86_64-linux-gnu.so(_ZN8FIDESlib4CKKS15KeySwitchingKey21loadLimbsFromSnapshotEv+0x2a)[0x78f6cacb84fa]
+Cuda failure /home/masi/PyFIDESlib/build/_deps/fideslib-src/src/CudaUtils.cu:434: 'out of memory'

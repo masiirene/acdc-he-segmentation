@@ -1,0 +1,33 @@
+=== SONDA 1b v2: le uscite del bootstrap, riuso della memoria e Offload ===
+  Bootstrap setup+keygen (bsgsDim=[8, 8]): 11.1s
+  chiavi di rotazione extra: 23
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 40 ~ 14160MB
+  LoadContext: 36.5s
+  cache: ciphertext 6.0 GiB, rotazioni 6.0 GiB, blocco conv B=8
+
+  ingresso a livello 1; memoria GPU all'inizio: 14335 MiB
+  riscaldamento (un bootstrap, non contato) ...
+  memoria GPU dopo il riscaldamento: 28763 MiB
+
+  R1  due lotti con Offload, uscite tenute vive
+      lotto 1: 28763 -> 30779 MiB     126.0 MiB per ciphertext
+      lotto 2: 30779 -> 31803 MiB      64.0 MiB per ciphertext
+
+  R2  eliminazione delle uscite tenute
+      31803 -> 31803 MiB   restituiti 0 MiB su 3040 cresciuti
+
+  R4  dopo l'eliminazione: altri 16 bootstrap con Offload, uscite tenute vive
+      31803 -> 34875 MiB     192.0 MiB per ciphertext
+
+  R5  16 bootstrap tenuti sulla GPU SENZA Offload
+      34875 -> 36923 MiB     128.0 MiB per ciphertext
+      dopo l'eliminazione: 36923 -> 36923 MiB   restituiti 0 MiB su 2048
+
+=== LETTURA ===
+  - regime: 64 MiB per uscita di bootstrap parcheggiata con Offload (il primo lotto in piu' ~992 MiB una tantum).
+  - R4: la crescita e' di nuovo 192 MiB per ciphertext: i blocchi liberati NON vengono riusati, la perdita e' cumulativa. A 3296 bootstrap sarebbero ~206 GiB: la rete intera non puo' finire cosi'.
+  - senza Offload un'uscita pesa 128 MiB sulla GPU e alla distruzione se ne restituisce il 0%: non e' una via d'uscita.

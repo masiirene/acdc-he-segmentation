@@ -1,0 +1,78 @@
+=== RETE IN HE: crypto/pack_narrow.npz ===
+  k=5, filtri [4, 8, 16, 32, 16], norm bypassate 4 (dec0.block.1,enc4.block.1,dec2.block.4,enc3.block.1)
+  immagine 256x224, N=65536 slot, 5 livelli del reticolo; modo 'narrow', fetta 1 (val)
+  costo stimato per stadio (livelli): [35, 24, 38, 24, 24, 24, 6, 35, 6, 32, 24, 24, 24, 6, 21, 24, 6, 38]
+  opzioni: MASK_LAUNDER=0 MARGIN=1 CONV_B=8 CHECK=1 STOP_AFTER= AUX_CLEAR=1
+    [GPU] inizio: 12152 MiB
+  Bootstrap setup+keygen (bsgsDim=[8, 8]): 10.9s
+  chiavi di rotazione extra: 51 (5.8s)
+GPU 0: NVIDIA A40
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+Adding bootstrap precomputation to GPU for 65536 slots.
+Plaintexts loaded: 248 ~ 11904MB (offloaded to host RAM until first use)
+Rotation keys loaded: 68 ~ 24072MB
+  LoadContext: 59.9s
+  cache: ciphertext 3.0 GiB, rotazioni 6.0 GiB
+    [GPU] dopo LoadContext: 16225 MiB
+    pool: aux 0 | pool {'device': 0, 'cuda_free_bytes': 30686642176, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 102 | AUX_CLEAR=1
+
+Convenzione dei coefficienti di Chebyshev ...
+  dominio del polinomio [0.4295, 7.379], grado 2 (riempito a grado 4), tutti gli slot in dominio
+  prova convenzione: c0 x 1 (post_iter 0): errore 2.53e-01
+  prova convenzione: c0 x 2 (post_iter 0): errore 2.34e-12
+  convenzione scelta: c0 x 2, post_iter=0 supportato
+
+  stadio      schema        canali livelli        bootstrap                                                     tempi                      
+  enc0.1      newton        1->4    livelli  0->30 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 0) | conv     1.9s norm     5.0s | GPU 23453 MiB | errore canale 0 1.30e-10 (scala 9.32, relativo 1.4e-11)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 23107534848, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 102]
+  enc0.2      cheb          4->4    livelli 30->29 | bootstrap ingresso    4 newton    0 inversa    4 altro   0 (cumulati 8) | conv     2.0s norm    18.1s | GPU 33693 MiB | errore canale 0 1.03e-02 (scala 7.68, relativo 1.3e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 12370116608, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 102]
+  enc1.1      newton        4->8    livelli 29->39 | bootstrap ingresso    4 newton    8 inversa    0 altro   0 (cumulati 20) | conv     2.6s norm    35.7s | GPU 34717 MiB | errore canale 0 1.36e-02 (scala 14.5, relativo 9.3e-04)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 11296374784, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 102]
+  enc1.2      cheb          8->8    livelli 39->29 | bootstrap ingresso    8 newton    0 inversa    8 altro   0 (cumulati 36) | conv     3.8s norm    35.6s | GPU 34717 MiB | errore canale 0 1.07e-01 (scala 27.1, relativo 4.0e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 11296374784, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 102]
+  enc2.1      cheb          8->16   livelli 29->29 | bootstrap ingresso    8 newton    0 inversa   16 altro   0 (cumulati 60) | conv     6.4s norm    70.6s | GPU 35741 MiB | errore canale 0 7.52e-02 (scala 21.4, relativo 3.5e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 10222632960, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 102]
+  enc2.2      cheb         16->16   livelli 29->29 | bootstrap ingresso   16 newton    0 inversa   16 altro   0 (cumulati 92) | conv    11.4s norm    70.8s | GPU 36765 MiB | errore canale 0 4.66e-02 (scala 13.7, relativo 3.4e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 9148891136, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  enc3.1      senza norm   16->32   livelli 29->34 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 92) | conv    14.2s norm     2.2s | GPU 36765 MiB | errore canale 0 1.44e-01 (scala 19.2, relativo 7.5e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 9148891136, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  enc3.2      newton       32->32   livelli 34->36 | bootstrap ingresso   32 newton   32 inversa    0 altro   0 (cumulati 156) | conv    34.8s norm    90.7s | GPU 36941 MiB | errore canale 0 1.64e-01 (scala 19.8, relativo 8.3e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 8964341760, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  enc4.1      senza norm   32->16   livelli 36->41 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 156) | conv     5.0s norm     0.3s | GPU 36941 MiB | errore canale 0 9.56e-02 (scala 8.83, relativo 1.1e-02)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 8964341760, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  enc4.2      newton       16->16   livelli 41->33 | bootstrap ingresso   16 newton   16 inversa    0 altro   0 (cumulati 188) | conv     7.0s norm    44.8s | GPU 37965 MiB | errore canale 0 9.39e-03 (scala 6.12, relativo 1.5e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 7890599936, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  up3+skip    upsampling   16->32   livelli 33->36 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 188) | conv     4.3s norm     0.0s | GPU 37965 MiB
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 7890599936, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec3.1      cheb         32->32   livelli 36->29 | bootstrap ingresso   32 newton    0 inversa   32 altro   0 (cumulati 252) | conv    41.5s norm   141.2s | GPU 38813 MiB | errore canale 0 1.03e-01 (scala 19, relativo 5.4e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 7001407488, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec3.2      cheb         32->32   livelli 29->29 | bootstrap ingresso   32 newton    0 inversa   32 altro   0 (cumulati 316) | conv    40.7s norm   141.2s | GPU 40861 MiB | errore canale 0 8.31e-02 (scala 17.2, relativo 4.8e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  up2+skip    upsampling   32->16   livelli 29->31 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 316) | conv     6.6s norm     0.0s | GPU 40861 MiB
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec2.1      cheb         16->16   livelli 31->29 | bootstrap ingresso   16 newton    0 inversa   16 altro   0 (cumulati 348) | conv    11.9s norm    71.1s | GPU 40861 MiB | errore canale 0 1.07e-01 (scala 16.6, relativo 6.4e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec2.2      senza norm   16->16   livelli 29->34 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 348) | conv     7.6s norm     1.1s | GPU 40861 MiB | errore canale 0 5.93e-02 (scala 13.6, relativo 4.4e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  up1+skip    upsampling   16->8    livelli 34->36 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 348) | conv     1.9s norm     0.0s | GPU 40861 MiB
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec1.1      cheb          8->8    livelli 36->40 | bootstrap ingresso    8 newton    0 inversa    0 altro   0 (cumulati 356) | conv     4.3s norm     3.8s | GPU 40861 MiB | errore canale 0 1.28e-01 (scala 25.1, relativo 5.1e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec1.2      cheb          8->8    livelli 40->29 | bootstrap ingresso    8 newton    0 inversa    8 altro   0 (cumulati 372) | conv     3.6s norm    35.7s | GPU 40861 MiB | errore canale 0 2.23e-01 (scala 49.1, relativo 4.5e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  up0+skip    upsampling    8->4    livelli 29->31 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 372) | conv     1.2s norm     0.0s | GPU 40861 MiB
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec0.1      senza norm    4->4    livelli 31->36 | bootstrap ingresso    0 newton    0 inversa    0 altro   0 (cumulati 372) | conv     0.9s norm     0.4s | GPU 40861 MiB | errore canale 0 2.14e-01 (scala 55.6, relativo 3.8e-03)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+  dec0.2      newton        4->4    livelli 36->39 | bootstrap ingresso    4 newton    4 inversa    0 altro   0 (cumulati 380) | conv     2.0s norm    17.9s | GPU 40861 MiB | errore canale 0 8.96e-01 (scala 39.9, relativo 2.2e-02)
+              [aux 0 | pool {'device': 0, 'cuda_free_bytes': 4853923840, 'cuda_total_bytes': 47699722240, 'buckets': [{'chunk_bytes': 1024]
+
+=== RIEPILOGO ===
+  tempo totale: 27.2 min (conv 3.6 min, norm+attivazione 13.1 min)
+  bootstrap totali: 380  (ingresso agli stadi 188, dentro la radice inversa 60, su inv_std 132, altro 0)
+  livello massimo raggiunto: 41 (limite 43); picco memoria GPU: 40861 MiB
+  livello dei logit: 40
+  logit HE vs riferimento APPROSSIMATO: errore max 9.995e-01, medio 2.633e-03 (scala dei logit 149.5)
+  classe per pixel: HE = approssimato 99.60% | HE = esatto 99.59% | HE = etichetta 42.31%
+  Dice di questa fetta (RV/MYO/LV): HE 0.062 (0.173/0.000/0.013)  approssimato 0.062  esatto 0.062

@@ -133,6 +133,17 @@ class FakeCC:
         return self._mk(a.v - self._v(b), self._l(a, b))
 
     def EvalChebyshevSeries(self, c, co, lo, hi):                      # convenzione OpenFHE: c0 dimezzato
+        co = list(co)
+        if os.environ.get("FAKE_CHEB_QUIRK", "1") == "1":
+            # Comportamento OSSERVATO su Zeus (batteria del 5 ott): gli zeri finali dei coefficienti vengono scartati prima
+            # di scegliere il percorso (stessi errori con e senza riempimento a zeri); per i gradi 1 e 2 il risultato e'
+            # sbagliato; un polinomio costante lancia un'eccezione.
+            while len(co) > 1 and co[-1] == 0:
+                co.pop()
+            if len(co) == 1:
+                raise RuntimeError("polinomio costante")
+            if len(co) <= 3:
+                return self._mk(3.0 * c.v + 2.0, c.l + 8)                  # valore sbagliato, come sul grado 1 reale
         t = c.v
         b1 = np.zeros_like(t)
         b2 = np.zeros_like(t)
@@ -143,6 +154,24 @@ class FakeCC:
     def EvalBootstrap(self, c):
         self.nboot += 1
         return CT(c.v + self.rng.normal(size=self.N) * self.noise if self.noise else c.v.copy(), 21)
+
+    def GetCiphertextCacheResidentBytes(self):
+        return self.ct_resident * 1048576
+
+    def OffloadCiphertexts(self):
+        self.ct_resident = 0
+
+    def GetDeviceObjectCounts(self):
+        return {"ciphertexts": 7, "plaintexts": 3}
+
+    def GetAuxiliaryPolyPoolSize(self):
+        return self.aux_calls
+
+    def ClearAuxiliaryPolyPool(self):
+        self.aux_calls += 1
+
+    def Synchronize(self):
+        pass
 
     def TrimGPUMemoryPool(self):
         pass
@@ -174,8 +203,14 @@ def main():
           f"{sum(1 for s in meta['schemes'].values() if s['kind'] == 'cheb')} Chebyshev + "
           f"{sum(1 for s in meta['schemes'].values() if s['kind'] == 'newton')} Newton; immagine {H0}x{W0}; rumore bootstrap finto {noise}")
     cc = FakeCC(g.N, needed_rotations(g), noise)
+    cc.aux_calls = 0
+    cc.ct_resident = 640
+    cc = hn.PoolCC(cc, os.environ.get('AUX_CLEAR', '0') == '1')
     he = LHE(cc, Keys(), g)
-    runner = hn.HERunner(he, pack, log=lambda s: print(s, flush=True), mem=lambda: 0, check=True, stop_after=stop)
+    guard = int(os.environ.get('SMOKE_GUARD', '0'))                # prova della protezione di memoria: limite finto
+    runner = hn.HERunner(he, pack, log=lambda s: print(s, flush=True), mem=lambda: 100 if guard else 0, check=True,
+                         stop_after=stop, mem_guard=guard // 2,
+                         evict_ct=os.environ.get('EVICT_CT', '0') == '1')
     t0 = time.time()
     res = runner.run()
     print(f"\n  [fumo] tempo CPU {time.time() - t0:.0f}s; chiavi di rotazione usate {len(cc.used)} su {len(needed_rotations(g))} "

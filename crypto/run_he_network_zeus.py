@@ -11,6 +11,11 @@ Variabili d'ambiente:
   ROT_CACHE_GIB  cache chiavi di rotazione (default 6: le 16 potenze di 2 delle somme ne vogliono ~5.7; a 5 la norm
                  va 3.7 volte piu' lenta)
   CONV_B         canali d'uscita per blocco della convoluzione (default 8)
+  TRIM_SYNC      1 (predefinito) = Synchronize() prima di ogni TrimGPUMemoryPool: con la sincronizzazione la prova ridotta del
+                 5 ott e' arrivata in fondo (picco 40,9 GB); senza, era andata fuori memoria a meta' (vedi he_network.PoolCC)
+  AUX_CLEAR      1 (predefinito) = in piu' ClearAuxiliaryPolyPool(): nella prova ridotta del 5 ott 'aux 0' si leggeva DOPO la
+                 pulizia; senza (prova sulla rete vera) il pool ausiliario cresce, 20 -> 58 voci in due stadi
+  MEM_GUARD_MIB  limite di memoria GPU (predefinito 44500): oltre, si ferma e stampa il resoconto parziale (0 = spento)
   MASK_LAUNDER   1 = dopo ogni moltiplicazione per maschera si fa EvalAdd(., 0.0) (vedi probe_mask_leak_zeus.py)
   MARGIN         livelli di margine nei controlli del budget (default 1)
   CHECK          1 = confronta il canale 0 di ogni stadio con il riferimento (costa una decifrazione per stadio)
@@ -120,15 +125,21 @@ def main():
             costs.append(hn.stage_cost(hn.get_scheme(meta, st["norm"]) if st["norm"] else None))
     print(f"  costo stimato per stadio (livelli): {costs}")
     print(f"  opzioni: MASK_LAUNDER={os.environ.get('MASK_LAUNDER', '0')} MARGIN={os.environ.get('MARGIN', '1')} "
-          f"CONV_B={os.environ.get('CONV_B', '8')} CHECK={os.environ.get('CHECK', '0')} STOP_AFTER={os.environ.get('STOP_AFTER', '')}")
+          f"CONV_B={os.environ.get('CONV_B', '8')} CHECK={os.environ.get('CHECK', '0')} STOP_AFTER={os.environ.get('STOP_AFTER', '')} "
+          f"TRIM_SYNC={os.environ.get('TRIM_SYNC', '1')} AUX_CLEAR={os.environ.get('AUX_CLEAR', '1')} MEM_GUARD_MIB={os.environ.get('MEM_GUARD_MIB', '44500')}")
     assert g.N == 65536, "il contesto e' costruito per 65.536 slot"
     print(f"    [GPU] inizio: {used_mib()} MiB")
     cc, keys = build_context(g)
     print(f"    [GPU] dopo LoadContext: {used_mib()} MiB", flush=True)
+    aux_clear = os.environ.get('AUX_CLEAR', '1') == '1'
+    sync_trim = os.environ.get('TRIM_SYNC', '1') == '1'
+    cc = hn.PoolCC(cc, aux_clear, sync_trim)
+    print(f"    pool: {hn.pool_info(cc) or 'nessuna statistica disponibile'} | TRIM_SYNC={int(sync_trim)} AUX_CLEAR={int(aux_clear)}", flush=True)
     he = LHE(cc, keys, g)
     runner = hn.HERunner(he, pack, log=lambda s: print(s, flush=True), mem=used_mib,
                          margin=int(os.environ.get("MARGIN", "1")), conv_b=int(os.environ.get("CONV_B", "8")),
-                         check=os.environ.get("CHECK", "0") == "1", stop_after=os.environ.get("STOP_AFTER") or None)
+                         check=os.environ.get("CHECK", "0") == "1", stop_after=os.environ.get("STOP_AFTER") or None,
+                         mem_guard=int(os.environ.get("MEM_GUARD_MIB", "44500")))
     runner.run()
 
 
