@@ -15,6 +15,9 @@ Variabili d'ambiente:
                  5 ott e' arrivata in fondo (picco 40,9 GB); senza, era andata fuori memoria a meta' (vedi he_network.PoolCC)
   AUX_CLEAR      1 (predefinito) = in piu' ClearAuxiliaryPolyPool(): nella prova ridotta del 5 ott 'aux 0' si leggeva DOPO la
                  pulizia; senza (prova sulla rete vera) il pool ausiliario cresce, 20 -> 58 voci in due stadi
+  EVICT_CT       1 (predefinito) = OffloadCiphertexts() dopo la convoluzione e a fine passo (la cache dei ciphertext, impostata a 3 GiB,
+                 sulla rete vera e' salita a 7,7 GiB: il limite e' morbido)
+  BS_CACHE_GIB   cache del precalcolo del bootstrap (predefinito 1: ogni bootstrap rilegge dalla RAM tutti gli 11,9 GB di plaintext)
   MEM_GUARD_MIB  limite di memoria GPU (predefinito 44500): oltre, si ferma e stampa il resoconto parziale (0 = spento)
   MASK_LAUNDER   1 = dopo ogni moltiplicazione per maschera si fa EvalAdd(., 0.0) (vedi probe_mask_leak_zeus.py)
   MARGIN         livelli di margine nei controlli del budget (default 1)
@@ -97,13 +100,14 @@ def build_context(g):
     ct_gib = float(os.environ.get("CT_CACHE_GIB", "3"))
     rot_gib = float(os.environ.get("ROT_CACHE_GIB", "6"))
     cc.SetRotationKeyCache(int(rot_gib * GiB))
-    cc.SetBootstrapCache(1 * GiB)
+    bs_gib = float(os.environ.get("BS_CACHE_GIB", "1"))
+    cc.SetBootstrapCache(int(bs_gib * GiB))
     t0 = time.time()
     cc.LoadContext(keys.publicKey)
     print(f"  LoadContext: {time.time() - t0:.1f}s", flush=True)
     cc.SetPlaintextCache(1 * GiB)
     cc.SetCiphertextCache(int(ct_gib * GiB))
-    print(f"  cache: ciphertext {ct_gib} GiB, rotazioni {rot_gib} GiB", flush=True)
+    print(f"  cache: ciphertext {ct_gib} GiB, rotazioni {rot_gib} GiB, bootstrap {bs_gib} GiB", flush=True)
     return cc, keys
 
 
@@ -126,7 +130,8 @@ def main():
     print(f"  costo stimato per stadio (livelli): {costs}")
     print(f"  opzioni: MASK_LAUNDER={os.environ.get('MASK_LAUNDER', '0')} MARGIN={os.environ.get('MARGIN', '1')} "
           f"CONV_B={os.environ.get('CONV_B', '8')} CHECK={os.environ.get('CHECK', '0')} STOP_AFTER={os.environ.get('STOP_AFTER', '')} "
-          f"TRIM_SYNC={os.environ.get('TRIM_SYNC', '1')} AUX_CLEAR={os.environ.get('AUX_CLEAR', '1')} MEM_GUARD_MIB={os.environ.get('MEM_GUARD_MIB', '44500')}")
+          f"TRIM_SYNC={os.environ.get('TRIM_SYNC', '1')} AUX_CLEAR={os.environ.get('AUX_CLEAR', '1')} MEM_GUARD_MIB={os.environ.get('MEM_GUARD_MIB', '44500')} "
+          f"EVICT_CT={os.environ.get('EVICT_CT', '1')} BS_CACHE_GIB={os.environ.get('BS_CACHE_GIB', '1')}")
     assert g.N == 65536, "il contesto e' costruito per 65.536 slot"
     print(f"    [GPU] inizio: {used_mib()} MiB")
     cc, keys = build_context(g)
@@ -139,7 +144,8 @@ def main():
     runner = hn.HERunner(he, pack, log=lambda s: print(s, flush=True), mem=used_mib,
                          margin=int(os.environ.get("MARGIN", "1")), conv_b=int(os.environ.get("CONV_B", "8")),
                          check=os.environ.get("CHECK", "0") == "1", stop_after=os.environ.get("STOP_AFTER") or None,
-                         mem_guard=int(os.environ.get("MEM_GUARD_MIB", "44500")))
+                         mem_guard=int(os.environ.get("MEM_GUARD_MIB", "44500")),
+                         evict_ct=os.environ.get("EVICT_CT", "1") == "1")
     runner.run()
 
 
